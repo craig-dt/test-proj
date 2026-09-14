@@ -1,0 +1,32 @@
+# Fresh-agent review as a required check. Runs the eng-reviewer brief against the PR diff and
+# fails the check on a BLOCK verdict, so "author never grades its own homework" is enforced by
+# branch protection rather than remembered. Needs repo secret ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN).
+# Cost: one review per PR push. Skip with the `skip-review` label for docs-only PRs.
+name: review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+jobs:
+  review:
+    name: review
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-review') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the eng-reviewer defined in .claude/agents/eng-reviewer.md — read it and follow it.
+            Review PR #${{ github.event.pull_request.number }} against the agent brief in the issue it closes
+            (find "Closes #N" in the PR body; `gh issue view N --comments`). Run the test suite yourself.
+            Post your findings as a single PR comment ranked by severity, ending with exactly one line:
+            VERDICT: MERGEABLE | NEEDS CHANGES | BLOCK
+            If the verdict is BLOCK, exit non-zero after posting.
+          claude_args: "--max-turns 40 --allowedTools Read,Grep,Glob,Bash(gh *),Bash(uv *),Bash(git diff *),Bash(git log *)"

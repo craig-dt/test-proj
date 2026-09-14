@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# agent-run.sh — headless build loop.
+#
+# For each `ready-for-agent` issue in the milestone (dependency order = ascending issue number, since
+# /project:slice publishes blockers first): claim it, create a worktree on agent/issue-N, run
+# `claude -p` with the /project:build prompt, and require a PR at the end. Success → issue labelled
+# agent:pr-open. Failure/timeout/no PR → agent:failed + the tail of the log posted as a comment.
+# Also promotes `blocked` issues whose blockers are all closed.
+#
+# Usage:
+#   scripts/agent-run.sh --milestone "<name>" [--max-parallel 2] [--max-turns 80] [--once] [--dry-run]
+#   scripts/agent-run.sh --issue 42            # run exactly one issue (supervised-ish; still headless)
+#
+# Requirements: gh (authenticated, NO admin scope — branch protection must bind the runner too), git, jq, claude.
+# Runs from the repo root. Worktrees live in ../<repo>-wt/issue-N so they never pollute the main checkout.
+
+set -euo pipefail
+
+MILESTONE=""; MAX_PARALLEL=2; MAX_TURNS=80; ONCE=0; DRY=0; ONLY_ISSUE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --milestone)    MILESTONE="$2"; shift 2 ;;
+    --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
+    --max-turns)    MAX_TURNS="$2"; shift 2 ;;
+    --issue)        ONLY_ISSUE="$2"; shift 2 ;;
+    --once)         ONCE=1; shift ;;
+    --dry-run)      DRY=1; shift ;;
+    -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+for bin in gh git jq claude; do command -v "$bin" >/dev/null || { echo "missing: $bin" >&2; exit 1; }; done
+ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+WT_BASE="$(dirname "$ROOT")/$(basename "$ROOT")-wt"
+LOG_DIR="$ROOT/.agent-logs"; mkdir -p "$LOG_DIR" "$WT_BASE"
+PROMPT_FILE="$ROOT/scripts/prompts/build-issue.md"
+[ -f "$PROMPT_FILE" ] || { echo "missing $PROMPT_FILE" >&2; exit 1; }
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
+
+label() { gh issue edit "$1" --add-label "$2" >/dev/null; }
+unlabel() { gh issue edit "$1" --remove-label "$2" >/dev/null 2>&1 || true; }
+
+# --- promote blocked issues whose "## Blocked by" items are all closed ----------------------------------
+promote_blocked() {
+  local ms=(); [ -n "$MILESTONE" ] && ms=(--milestone "$MILESTONE")
+  gh issue list "${ms[@]}" --label blocked --state open --json number,body --limit 200 \
+  | jq -c '.[]' | while read -r row; do
+      n="$(jq -r .number <<<"$row")"
+      blockers="$(jq -r .body <<<"$row" | awk '/^## Blocked by/{f=1;next} /^## /{f=0} f' | grep -oE '#[0-9]+' | tr -d '#' || true)"
+      open=0
+      for b in $blockers; do
+        st="$(gh issue view "$b" --json state -q .state 2>/dev/null || echo OPEN)"
+        [ "$st" = "CLOSED" ] || open=1
+      done
+      if [ "$open" -eq 0 ]; then
+        log "promoting #$n (blockers closed)"
+        [ "$DRY" -eq 1 ] || { unlabel "$n" blocked; label "$n" ready-for-agent; }
+      fi
+    done
+}
+
+# --- pick next issue ------------------------------------------------------------------------------------
+next_issue() {
+  if [ -n "$ONLY_ISSUE" ]; then echo "$ONLY_ISSUE"; return; fi
+  local ms=(); [ -n "$MILESTONE" ] && ms=(--milestone "$MILESTONE")
+  gh issue list "${ms[@]}" --label ready-for-agent --state open --json number,labels --limit 200 \
+  | jq -r '[.[] | select(all(.labels[].name; . != "agent:in-progress" and . != "agent:pr-open" and . != "agent:failed" and . != "blocked" and . != "needs-info"))] | sort_by(.number) | .[0].number // empty'
+}
+
+# --- run one issue in its own worktree ------------------------------------------------------------------
+run_issue() {
+  local n="$1" branch="agent/issue-$1" wt="$WT_BASE/issue-$1" logf="$LOG_DIR/issue-$1.$(date +%Y%m%d-%H%M%S).log"
+  log "claiming #$n → $branch"
+  if [ "$DRY" -eq 1 ]; then log "(dry-run) would build #$n in $wt"; return 0; fi
+  label "$n" agent:in-progress; unlabel "$n" ready-for-agent
+
+  git fetch -q origin main
+  if [ -d "$wt" ]; then git -C "$wt" checkout -q "$branch" 2>/dev/null || true
+  else git worktree add -q -B "$branch" "$wt" origin/main; fi
+
+  # Per-issue prompt: the command file + the issue number. Claude reads the issue itself via gh.
+  local prompt; prompt="$(sed "s/{{ISSUE}}/$n/g; s#{{REPO}}#$REPO#g" "$PROMPT_FILE")"
+
+  local rc=0
+  ( cd "$wt" && claude -p "$prompt" \
+      --max-turns "$MAX_TURNS" \
+      --output-format json \
+      --permission-mode acceptEdits \
+      --allowedTools "Read,Edit,Write,MultiEdit,Glob,Grep,Bash,Skill,Agent" \
+    ) >"$logf" 2>&1 || rc=$?
+
+  # Success = a PR exists for the branch and CI is at least queued.
+  local pr; pr="$(gh pr list --head "$branch" --state open --json number -q '.[0].number // empty' || true)"
+  if [ "$rc" -eq 0 ] && [ -n "$pr" ]; then
+    log "#$n → PR #$pr"
+    unlabel "$n" agent:in-progress; label "$n" agent:pr-open
+    gh issue comment "$n" --body "> *Generated by the build runner.*
+
+Built on \`$branch\` → PR #$pr. Review with \`/project:verify $pr\`." >/dev/null
+  else
+    log "#$n FAILED (rc=$rc, pr='${pr:-none}') — see $logf"
+    unlabel "$n" agent:in-progress; label "$n" agent:failed
+    {
+      echo "> *Generated by the build runner.*"; echo
+      echo "Build attempt failed (exit $rc, PR: ${pr:-none}). Last 60 log lines:"; echo
+      echo '```'; tail -60 "$logf" | jq -r 'if type=="object" then (.result // .message // tostring) else . end' 2>/dev/null || tail -60 "$logf"; echo '```'
+      echo; echo "Re-run after fixing with: \`scripts/agent-run.sh --issue $n\` (remove the \`agent:failed\` label first)."
+    } | gh issue comment "$n" --body-file - >/dev/null
+  fi
+}
+
+# --- main loop ------------------------------------------------------------------------------------------
+promote_blocked
+while :; do
+  # count live workers
+  while [ "$(jobs -rp | wc -l)" -ge "$MAX_PARALLEL" ]; do sleep 5; done
+  n="$(next_issue)"
+  if [ -z "$n" ]; then
+    if [ "$(jobs -rp | wc -l)" -eq 0 ]; then log "queue empty; done."; break; fi
+    sleep 15; promote_blocked; continue
+  fi
+  run_issue "$n" &
+  [ -n "$ONLY_ISSUE" ] && { wait; break; }
+  [ "$ONCE" -eq 1 ] && { wait; break; }
+  sleep 3
+done
+wait
+[ -x scripts/status.py ] && python3 scripts/status.py || true

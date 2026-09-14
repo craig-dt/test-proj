@@ -1,0 +1,21 @@
+# Lint + tests on every PR and push to main. The job name `ci` is what branch protection requires.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.12" }
+      - run: uv sync --all-extras --dev
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run pytest -q --maxfail=1
