@@ -17,8 +17,8 @@ An input line that fails to parse or violates the column contract. It is counted
 _Avoid_: bad row, error row, dropped row
 
 **Internal host**:
-An IP address inside the site's private ranges. By default the RFC 1918 ranges plus loopback and link-local;
-the analyst may replace the list per run.
+An IP address inside the site's private ranges. By default RFC 1918, IPv4 loopback and link-local, and IPv6
+unique-local, loopback and link-local; the analyst may replace the list per run.
 _Avoid_: local host, inside host, private IP (as a synonym for the concept; RFC 1918 is only the default rule)
 
 **External host**:

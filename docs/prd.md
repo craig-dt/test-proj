@@ -131,7 +131,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 **Key Business Rules / Logic:**
 
-- **Candidates.** Only Outbound flows are considered: source is an Internal host, destination is an External host. Internal hosts are, by default, RFC 1918 ranges plus loopback and link-local. `--internal <CIDR>` (repeatable) replaces the default list for the run.
+- **Candidates.** Only Outbound flows are considered: source is an Internal host, destination is an External host. Internal hosts are, by default, RFC 1918 ranges, IPv4 loopback and link-local, and IPv6 `fc00::/7`, `::1` and `fe80::/10`. `--internal <CIDR>` (repeatable, either address family) replaces the default list for the run.
 - **Grouping.** Scoring is per Tuple: (source, destination, destination port, protocol). `53/tcp` and `53/udp` to the same host are different Tuples. ICMP Outbound flows form Tuples with port 0 and are scored like any other.
 - **Gate.** A Tuple is scored only if it has at least `--min-flows` flows (default 10) and at least 3 non-zero Intervals. The default stays at 10 rather than the 20 used by CV-only tools (eng-review F13) because the four-signal score, unlike CV alone, is not carried by count, and a 10-minute capture of a 60 s beacon should still surface; the analyst raises it on noisy files. Zero-second Intervals (several flows in the same second) are ignored by the interval statistics but counted as flows.
 - **Input order.** Order matters only within a Tuple. A flow whose `ts` is earlier than the previous flow of the same Tuple is an out-of-order row: it is dropped from that Tuple's statistics and counted. At the end of the run stderr reports `N rows out of order (dropped from beacon scoring)` separately from the malformed-row count, and the JSON `meta` carries `rows_out_of_order`. The run completes with exit 0. Global interleaving between Tuples (normal for flow collectors) is not an error. Only `beacons` checks order. Caution for the analyst: a heavily shuffled file scores on a fraction of its data; the stderr count is the only warning.
@@ -361,7 +361,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | **#** | **Question** | **Owner** | **Target Date** | **Resolution** |
 | 1 | Target release date for v0.1? | Craig | Before slice stage | TBD |
 | 2 | Should `--exclude-port` / `--exclude-dst` ship in v0.1 or stay out? | Craig | Eng review | TBD (PRD assumes out) |
-| 3 | IPv6: accept and treat `fc00::/7`, `::1`, `fe80::/10` as internal by default, or IPv4 only in v0.1? | Craig | Eng review | TBD (PRD recommends accept) |
+| 3 | IPv6: accept and treat `fc00::/7`, `::1`, `fe80::/10` as internal by default, or IPv4 only in v0.1? | Craig | Eng review | Resolved 2026-09-14 at slicing: accept IPv6; those ranges plus RFC 1918, IPv4 loopback and link-local are Internal by default (slice #14) |
 | 4 | `beacons` from stdin: spool to a temp file, or reject `-` for that command? | eng-reviewer | Eng review | Resolved 2026-09-14: reject with exit 1 (eng-review F4) |
 | 5 | Prevalence on small files: apply a minimum internal-host count before adjusting? | eng-reviewer | Eng review | Resolved 2026-09-14: floor of 10 internal hosts; denominator defined in 6.4 (eng-review F5) |
 | 6 | Windows: test in CI or state unsupported? | Craig | Before release | TBD |
