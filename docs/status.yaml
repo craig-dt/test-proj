@@ -2,20 +2,20 @@
 project: "test-proj"
 repo: "craig-dt/test-proj"
 milestone: "v0.1"
-current_stage: prd
+current_stage: eng_review
 notion_url: "https://app.notion.com/p/3db2a84a523081aa8932da6b9b33d209"
-prd_gdoc_url: ""
+prd_gdoc_url: "https://docs.google.com/document/d/1K0F8D7LklE2uj1EC0L2ViIB0_eSi8ABgRqv9OAH7ixs/edit"
 verified: ""
-updated: "2026-09-14T15:47:32-07:00"
+updated: "2026-09-14T16:20:24-07:00"
 stages:
   research: completed
-  prd: pending
+  prd: completed
   eng_review: pending
   slice: completed
-  build: pending
+  build: completed
   verify: pending
-slices: {"total": 1, "closed": 0, "open": 1}
-ready: [2]
+slices: {"total": 2, "closed": 2, "open": 0}
+ready: []
 in_progress: []
 pr_open: []
 failed: []
@@ -23,5 +23,5 @@ needs_info: []
 human: []
 blocked: []
 open_prs:
-  []
-next: "/project:prd <raw requirements>"
+  - {"number": 5, "branch": "agent/issue-4", "url": "https://github.com/craig-dt/test-proj/pull/5", "ci": "green"}
+next: "/project:eng-review"
