@@ -13,7 +13,8 @@ permissions:
 jobs:
   review:
     name: review
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-review') }}
+    # Test project: repo variable SKIP_REVIEW=true disables this job for every PR (Craig, 2026-09-14).
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-review') && vars.SKIP_REVIEW != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

@@ -1,0 +1,15 @@
+# Test project: every PR skips the fresh-agent review gate (Craig, 2026-09-14). Remove this file to restore it.
+name: label-skip-review
+on:
+  pull_request:
+    types: [opened, reopened]
+permissions:
+  pull-requests: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr edit "$PR" --add-label skip-review --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
