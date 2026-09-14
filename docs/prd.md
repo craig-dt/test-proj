@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-14 | Craig | 0.2 | Eng-review changes: beacon fixture spans the file (F1); RITA guards written into the formula (F2); prevalence sets moved to pass 2 (F3); `beacons` rejects stdin (F4); prevalence denominator and 10-host floor (F5); protocol added to the Tuple (F6); per-Tuple order check with dropped rows counted (F7); timestamp, encoding and header rules (F8, F9); generator and reference-laptop spec (F11); echoed-text sanitising (F14); nits (F15). F10 and F13 declined. |
 
 -----
 
@@ -32,7 +33,7 @@ A day of enterprise flow is tens of millions of rows. Spreadsheets fail on it, a
 
 - **Goal 1 — Three answers from one CSV:** `top-talkers`, `top-ports` and `beacons` run over the 7-column CSV with no server, database or network access.
 - **Goal 2 — Laptop scale:** on a 1 GB CSV (about 10 million rows) on a 16 GB laptop, `top-talkers` and `top-ports` finish within 60 s, `beacons` within 180 s, and peak resident memory stays under 1 GB for every command.
-- **Goal 3 — Beacon ranking that matches the textbook case:** a planted tuple connecting every 60 s ± 2 s for 30 flows ranks first; a browser-like host with hundreds of irregular flows to many destinations is absent from the top 5.
+- **Goal 3 — Beacon ranking that matches the textbook case:** a planted tuple connecting every 60 s ± 2 s for the whole span of a 24 h file (about 1440 flows) ranks first; a browser-like host with hundreds of irregular flows to many destinations, at least 5 of whose tuples pass the scoring gate, has no tuple in the top 5.
 - **Goal 4 — Robust to dirty exports:** malformed rows never abort a run; they are counted and reported on stderr, and the exit code stays 0.
 - **Goal 5 — Scriptable:** `--json` emits exactly one JSON object on stdout that `jq .` parses, with a `results` array and a `meta` object.
 
@@ -45,7 +46,7 @@ A day of enterprise flow is tens of millions of rows. Spreadsheets fail on it, a
 - No enrichment of any kind: no GeoIP, WHOIS, threat intelligence or DNS.
 - No persistent state, configuration files, safelists or plugins.
 - No GUI, web output or charts.
-- No sorting of unsorted input; the tool detects disorder and stops.
+- No sorting of unsorted input; `beacons` drops out-of-order flows per Tuple and reports how many.
 - Windows support is not promised in v0.1.
 
 -----
@@ -86,17 +87,18 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 ### 6.1 CSV ingestion
 
-**Description:** Every command reads the same input contract from a path argument or stdin (`-`), one row at a time, never holding the file in memory.
+**Description:** Every command reads the same input contract from a path argument, one row at a time, never holding the file in memory. `top-talkers` and `top-ports` also accept stdin (`-`). `beacons` does not: it reads the input twice, and spooling stdin to disk would break the no-files promise, so `beacons -` is a usage error (exit 1) with a one-line message.
 
 **Key Business Rules / Logic:**
 
-- The header row is mandatory and must be exactly `ts,src_ip,dst_ip,dst_port,proto,bytes,packets` in that order. Any other header is "input could not be read": exit code 2.
-- `ts` is ISO-8601 (`2026-09-14T18:04:11Z`) or Unix epoch seconds. Both may appear in the same file. ISO-8601 without a zone is UTC. Epoch may carry a fractional part. Sub-second precision is truncated to whole seconds.
+- The header row is mandatory and must be exactly `ts,src_ip,dst_ip,dst_port,proto,bytes,packets` in that order, after stripping a UTF-8 byte-order mark and surrounding whitespace or carriage returns from each cell. Any other header is "input could not be read": exit code 2. A file with a valid header and no data rows is a success: exit 0, empty results.
+- The file is read as UTF-8 with the byte-order mark tolerated and undecodable bytes replaced, never raising. Any record the CSV reader itself rejects (for example an oversized field or unbalanced quotes) is a Skipped row. Row numbers in messages are the physical line number of the record's first line.
+- `ts` is ISO-8601 or Unix epoch seconds. Both may appear in the same file. Accepted ISO-8601 forms are exactly those Python's `datetime.fromisoformat` accepts, plus a trailing `Z`; a `T` or a space may separate date and time; an offset such as `+02:00` is converted to UTC; no zone means UTC. Epoch may carry a fractional part. Sub-second precision is truncated to whole seconds. A parsed timestamp outside [2000-01-01, 2100-01-01) is a Skipped row, so epoch milliseconds are rejected rather than silently stretching the file span.
 - `proto` is `tcp`, `udp` or `icmp`, case-insensitive. For `icmp`, `dst_port` may be empty or `0`.
 - `bytes` and `packets` are non-negative integers.
 - `src_ip` and `dst_ip` are IPv4 or IPv6 addresses (IPv6 handling is Open Question 3).
 - A row that violates any rule above is a Skipped row: counted, never fatal. At the end of the run stderr reports `N rows skipped`. Skipped rows do not change the exit code.
-- A file that cannot be opened, is empty, or has a bad header exits with code 2. A usage error (bad flag, missing argument, non-positive `--limit`) exits with code 1. Success exits 0.
+- A file that cannot be opened, is completely empty (no header), or has a bad header exits with code 2. A usage error (bad flag, missing argument, non-positive `--limit`) exits with code 1. Success exits 0.
 - The input may be tens of millions of rows; no command loads the whole file.
 
 ### 6.2 `top-talkers`
@@ -130,17 +132,18 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 **Key Business Rules / Logic:**
 
 - **Candidates.** Only Outbound flows are considered: source is an Internal host, destination is an External host. Internal hosts are, by default, RFC 1918 ranges plus loopback and link-local. `--internal <CIDR>` (repeatable) replaces the default list for the run.
-- **Grouping.** Scoring is per Tuple: (source, destination, destination port).
-- **Gate.** A Tuple is scored only if it has at least `--min-flows` flows (default 10) and at least 3 non-zero Intervals. Zero-second Intervals (several flows in the same second) are ignored by the interval statistics but counted as flows.
-- **Input order.** Rows must be in non-decreasing `ts` order. On the first out-of-order row the command stops with exit code 2 and a message naming the row number. Only `beacons` checks order.
+- **Grouping.** Scoring is per Tuple: (source, destination, destination port, protocol). `53/tcp` and `53/udp` to the same host are different Tuples. ICMP Outbound flows form Tuples with port 0 and are scored like any other.
+- **Gate.** A Tuple is scored only if it has at least `--min-flows` flows (default 10) and at least 3 non-zero Intervals. The default stays at 10 rather than the 20 used by CV-only tools (eng-review F13) because the four-signal score, unlike CV alone, is not carried by count, and a 10-minute capture of a 60 s beacon should still surface; the analyst raises it on noisy files. Zero-second Intervals (several flows in the same second) are ignored by the interval statistics but counted as flows.
+- **Input order.** Order matters only within a Tuple. A flow whose `ts` is earlier than the previous flow of the same Tuple is an out-of-order row: it is dropped from that Tuple's statistics and counted. At the end of the run stderr reports `N rows out of order (dropped from beacon scoring)` separately from the malformed-row count, and the JSON `meta` carries `rows_out_of_order`. The run completes with exit 0. Global interleaving between Tuples (normal for flow collectors) is not an error. Only `beacons` checks order. Caution for the analyst: a heavily shuffled file scores on a fraction of its data; the stderr count is the only warning.
 - **Analysis span.** The whole file. The hourly histogram uses 24 bins spread evenly across the file's time span (one bin per hour when the span is 24 h; wider bins for longer spans, narrower for shorter).
-- **Beacon score** follows RITA v5 (see ADR 0001 and `docs/research.md`). Four sub-scores, each in [0, 1], averaged with equal weights of 0.25:
-  1. **Interval regularity:** mean of (1 − |Bowley skewness| of the Intervals) and ((median − MAD) / median of the Intervals), where MAD is the median absolute deviation; each term clamped to [0, 1].
-  2. **Byte-size consistency:** the same two statistics computed on the per-flow byte counts.
-  3. **Histogram shape:** 1 − (standard deviation / mean) of the 24 bin counts, 0 when that ratio exceeds 1.
-  4. **Duration coverage:** the larger of (Tuple time span / file time span) and (longest run of consecutive non-empty bins / 12), only when the Tuple appears in at least 6 bins; otherwise 0.
-- **Prevalence adjustment.** Prevalence is the share of Internal hosts in the file with at least one flow to the Tuple's destination. Score +0.15 when Prevalence ≤ 2 %, −0.15 when Prevalence ≥ 50 %, then clamped to [0, 1].
-- **Output.** All qualifying Tuples ranked by score descending, cut by `--limit` (default 20). Ties break by Tuple key ascending. Each row shows: source, destination, port/proto, flows, median Interval in seconds, the four sub-scores, the count of Internal hosts talking to that destination, and the final score to three decimals.
+- **Beacon score** follows RITA v5 (see ADR 0001 and `docs/research.md`). Four sub-scores, each clamped to [0, 1], averaged with equal weights of 0.25. Guards below are RITA's and are part of the requirement, not implementation detail:
+  1. **Interval regularity:** mean of a skew term and a dispersion term over the non-zero Intervals, sorted. Skew term = 1 − |Bowley skewness|, Bowley = (Q3 + Q1 − 2·Q2) / (Q3 − Q1), forced to 0 (term = 1) when Q3 − Q1 < 10 or the median equals either quartile. Quartiles are Python's `statistics.quantiles(n=4, method="exclusive")`. Dispersion term = (median − MAD) / median where MAD is the median absolute deviation, defaulting to 1 when the median is below 1; negative values become 0.
+  2. **Byte-size consistency:** the same two terms computed on the per-flow byte counts, except the dispersion term defaults to 0 when the median is below 1.
+  3. **Histogram shape:** 1 − (population standard deviation / mean) of the 24 bin counts; 0 when that ratio exceeds 1. RITA's bimodal-fit alternative is deliberately omitted in v0.1.
+  4. **Duration coverage:** the larger of (Tuple time span / file time span) and (longest run of consecutive non-empty bins / 12), each capped at 1, only when the Tuple appears in at least 6 bins; otherwise 0.
+- **Bins.** The file span is [first ts, last ts] over all rows read. Bin width = span / 24. A flow at exactly the last timestamp belongs to bin 23, never to a 25th bin.
+- **Prevalence adjustment.** Prevalence of a destination = (distinct Internal hosts with at least one Outbound flow to that destination) / (distinct Internal hosts that are the source of at least one Outbound flow anywhere in the file). The adjustment applies only when the denominator is at least 10; below that no adjustment is made and stderr says so once. Score +0.15 when Prevalence ≤ 2 %, −0.15 when Prevalence ≥ 50 %, then clamped to [0, 1].
+- **Output.** All qualifying Tuples ranked by score descending, cut by `--limit` (default 20). Ties break by Tuple key ascending. Each row shows: source, destination, port/proto, flows, median Interval in seconds, the four sub-scores, Prevalence as hosts-to-destination over total internal hosts (for example `3/412`), and the final score to three decimals. JSON results carry `prevalence` as a fraction and `hosts_to_dst`; `meta` carries `internal_hosts_total`.
 - No Tuple is ever labelled a beacon; the score is the whole verdict.
 
 ### 6.5 Output rendering
@@ -150,8 +153,9 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 **Key Business Rules / Logic:**
 
 - **Table output** (default): header row, column-aligned, numbers right-aligned, byte totals in human units (`1.2 GB`). Colour (bold header, highlighted first row) only when stdout is a TTY; plain text when piped or redirected. `--no-color` forces plain text; the `NO_COLOR` environment variable is honoured.
-- **JSON output** (`--json`): exactly one JSON object on stdout, nothing else. Shape: `{"results": [...], "meta": {...}}`. `meta` contains `command`, `input` (path or `-`), `rows` (rows read), `rows_skipped`, `elapsed_s`, `version`. Numbers are raw integers or floats, never formatted strings. Skipped-row and informational messages still go to stderr.
-- `--version` prints the tool version from the package metadata; `--help` documents every command and flag.
+- **JSON output** (`--json`): exactly one JSON object on stdout, nothing else. Shape: `{"results": [...], "meta": {...}}`. `meta` contains `command`, `input` (path or `-`), `rows` (rows read), `rows_skipped`, `elapsed_s`, `version`, and for `beacons` also `rows_out_of_order`, `internal_hosts_total` and `prevalence_applied` (boolean). Numbers are raw integers or floats, never formatted strings. Skipped-row and informational messages still go to stderr.
+- `--version` prints the tool version from the package metadata (the package is named `flowtest`); `--help` documents every command and flag.
+- Any input text echoed in a message (header cells, offending row fragments) is truncated to 80 characters and stripped of control characters before printing, so a crafted CSV cannot inject terminal escape sequences into logs.
 
 ### 6.6 Packaging and platform
 
@@ -178,8 +182,8 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | US-06 | P0 | As a SOC analyst, I want a 1 GB export to finish in minutes without swapping so that the tool is usable on my laptop. | 60 s / 180 s / <1 GB RSS |
 | US-07 | P1 | As a SOC analyst, I want to rank (source, destination) pairs so that I can see whether a suspicious tuple is also a heavy talker. | `--direction pair` |
 | US-08 | P1 | As a threat hunter at a site with public internal ranges, I want to tell flowtest which CIDRs are internal so that outbound detection is correct. | `--internal`, repeatable |
-| US-09 | P1 | As a detection engineer, I want to read from stdin so that flowtest fits in a pipeline. | `-` argument |
-| US-10 | P1 | As a threat hunter, I want an out-of-order file to fail loudly so that I never trust beacon scores computed on shuffled data. | exit 2 with row number |
+| US-09 | P1 | As a detection engineer, I want `top-talkers` and `top-ports` to read from stdin so that flowtest fits in a pipeline. | `-` argument; not `beacons` (two passes) |
+| US-10 | P1 | As a threat hunter, I want out-of-order flows dropped and counted so that collector interleaving does not block me and shuffled data is visible. | per-Tuple check; stderr count; `meta.rows_out_of_order` |
 | US-11 | P1 | As a SOC analyst, I want colour in the terminal and plain text in a pipe so that both reading and redirecting work. | `--no-color`, `NO_COLOR` |
 | US-12 | P1 | As a threat hunter, I want shared destinations down-weighted so that update servers and NTP do not top the list. | Prevalence ±15 % |
 | US-13 | P2 | As a detection engineer, I want `--min-score` on `beacons` so that a script only receives strong candidates. | Future phase |
@@ -225,21 +229,29 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 ### US-02: Top ports
 
 - Given a fixture with tcp 443, udp 53 and icmp flows, when `top-ports` runs, then `443/tcp` shows `https`, `53/udp` shows `dns`, icmp rows are absent, and stderr says how many icmp flows were ignored.
+- Given an internal host with regular flows to the same destination on `53/tcp` and on `53/udp`, when `beacons` runs, then they appear as two separate Tuples.
 - Given `--proto udp`, when it runs, then only udp ports appear.
 
 ### US-03: Beacons
 
-- Given a fixture where `10.0.0.5 → 203.0.113.9:443` connects every 60 s ± 2 s for 30 flows, when `beacons` runs, then that tuple ranks first and its median interval is 60.
-- Given that fixture plus a browser-like host with hundreds of irregular flows to many destinations, when `beacons` runs, then no tuple from the browser-like host is in the top 5.
+- Given a 24 h fixture where `10.0.0.5 → 203.0.113.9:443/tcp` connects every 60 s ± 2 s from the first to the last timestamp of the file (about 1440 flows), when `beacons` runs, then that tuple ranks first, its median interval is 60, and its score is at least 0.85.
+- Given that fixture plus a browser-like host with hundreds of irregular flows to many destinations, of which at least 5 tuples pass the scoring gate, when `beacons` runs, then no tuple from the browser-like host is in the top 5.
+- Given the same planted tuple but only 30 flows (a 29-minute burst) inside the 24 h file, when `beacons` runs, then the tuple is still scored (gate passed) and the documentation states that short bursts score lower because the histogram and duration sub-scores need coverage of the file span.
 - Given a tuple with 9 flows and `--min-flows 10`, when `beacons` runs, then the tuple is absent from results.
 - Given a tuple of 12 flows all within the same second, when `beacons` runs, then it is absent (fewer than 3 non-zero intervals).
-- Given a perfectly regular tuple (all intervals equal, all sizes equal, present in every hour of a 24 h file), when scored, then its pre-prevalence score is 1.000.
-- Given an external host that 60 % of internal hosts talk to, when a tuple to it is scored, then its score is 0.15 lower than the unadjusted score, floored at 0.
+- Given a tuple of exactly 24 flows, one every 3600 s, identical byte counts, whose first and last flows are the first and last timestamps of the file, when scored, then its pre-prevalence score is 1.000 (skew forced to 0, dispersion terms at their defaults or 1, one flow per bin, full coverage).
+- Given a file with 100 internal hosts sourcing outbound flows and an external host that 60 of them talk to, when a tuple to it is scored, then its score is 0.15 lower than the unadjusted score, floored at 0.
+- Given a file with only 2 internal hosts, when any tuple is scored, then no prevalence adjustment is applied and stderr says the adjustment was skipped because fewer than 10 internal hosts were seen.
 
 ### US-04: Skipped rows
 
 - Given a file with 3 malformed rows, when each of the three commands runs, then it completes, stderr contains `3 rows skipped`, and the exit code is 0.
 - Given a row with `proto=ICMP` and empty `dst_port`, when parsed, then it is not skipped.
+- Given a file starting with a UTF-8 byte-order mark and a valid header, when any command runs, then it succeeds.
+- Given a row whose `ts` is `1757873051000` (epoch milliseconds), when parsed, then it is a Skipped row.
+- Given a row whose `ts` is `2026-09-14 18:04:11+02:00`, when parsed, then it is accepted as 16:04:11 UTC.
+- Given a file containing an undecodable byte inside a field, when any command runs, then it completes without a traceback.
+- Given a file with a valid header and zero data rows, when any command runs, then exit code is 0 and results are empty.
 
 ### US-05: JSON output
 
@@ -262,11 +274,14 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 ### US-09: Stdin
 
-- Given `cat fixture.csv | flowtest top-ports -`, when it runs, then output equals running on the path.
+- Given `cat fixture.csv | flowtest top-ports -`, when it runs, then Table output equals running on the path (JSON differs only in `meta.input` and `meta.elapsed_s`).
+- Given `flowtest beacons -`, when it runs, then exit code is 1, stdout is empty, and stderr says `beacons` needs a file path because it reads the input twice.
 
 ### US-10: Out-of-order input
 
-- Given a file whose row 41 has an earlier `ts` than row 40, when `beacons` runs, then it exits 2 and stderr names row 41; when `top-talkers` runs on the same file, then it succeeds.
+- Given a file where row 41 belongs to the same Tuple as row 40 and has an earlier `ts`, when `beacons` runs, then it exits 0, row 41 is excluded from that Tuple's statistics, stderr reports `1 rows out of order (dropped from beacon scoring)`, and `--json` gives `meta.rows_out_of_order == 1`.
+- Given a file where consecutive rows belong to different Tuples and their `ts` values interleave, when `beacons` runs, then no row is reported out of order.
+- Given the same files, when `top-talkers` or `top-ports` runs, then order is never checked and nothing is reported.
 
 ### US-11: Colour
 
@@ -275,7 +290,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 ### US-12: Prevalence
 
-- Given a destination reached by exactly one of 100 internal hosts, when its tuple is scored, then the score is 0.15 higher than unadjusted, capped at 1.
+- Given a destination reached by exactly one of 100 internal hosts sourcing outbound flows, when its tuple is scored, then the score is 0.15 higher than unadjusted, capped at 1, and the row shows `1/100`.
 
 -----
 
@@ -284,8 +299,8 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 **Architecture / System Design Notes:**
 
 - Single-pass streaming aggregation for `top-talkers` and `top-ports`; state is one counter per key.
-- `beacons` is two passes over the input: a counting pass that keeps only a flow count per Tuple and the per-destination internal-host set, then a scoring pass that keeps full state only for Tuples meeting the gate. Stdin therefore cannot be used with `beacons` unless buffered to a temp file; this is Open Question 4.
-- Interval and byte-size statistics come from per-Tuple integer histograms (value → count) capped in cardinality, so memory is bounded by the number of qualifying Tuples, not rows.
+- `beacons` is two passes over the input. Pass 1 keeps only a flow count per Tuple under a compact key, plus the set of all Internal hosts that source at least one Outbound flow (the Prevalence denominator). Pass 2 keeps full state only for Tuples meeting the gate, and builds the per-destination Internal-host sets only for destinations of those Tuples. Nothing whose size grows with distinct source–destination pairs may live in pass 1 (eng-review F3).
+- Interval and byte-size statistics come from a bounded per-Tuple sample or histogram, so memory is bounded by the number of qualifying Tuples, not rows. The exact bounding technique is a spec decision (eng-review F12).
 - The scoring formula is defined in Section 6.4 and ADR 0001; how it is computed is for `docs/spec.md`.
 
 **Dependencies (internal and external):**
@@ -301,7 +316,9 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 **Performance / Scale Requirements:**
 
-- Reference input: synthetic 10 M rows, about 1 GB, generated by a bundled seeded script.
+- Reference input: synthetic 10 M rows, about 1 GB, generated by a bundled seeded script with this shape: 500 Internal hosts; about 1.5 M distinct Outbound Tuples; 5 planted beacons with intervals between 30 s and 15 min, 5 to 10 % jitter, running the full 24 h span, each from a distinct Internal host to a destination no other host contacts; browser-like noise (many short-lived Tuples to many destinations, irregular intervals, varied sizes); an NTP-like Tuple from every Internal host to one shared destination every 15 min; 0.1 % malformed rows. The generator's parameters are documented so the shape can be varied.
+- Reference laptop: Apple Silicon or recent x86-64, 16 GB RAM, SSD, Python 3.12 via `uv run`. The recorded numbers name the machine.
+- Timestamp and IP validation may be memoised by string value in the shared reader (eng-review F10 measured 27 s naive vs 11 s memoised per 10 M rows).
 - Targets: `top-talkers`, `top-ports` ≤ 60 s; `beacons` ≤ 180 s; peak RSS < 1 GB on a 16 GB laptop; no swapping.
 - Performance check is a documented manual step before release, recorded in the PR; CI runs the small fixtures only.
 
@@ -327,13 +344,13 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 |  |  |  |  |
 | :-: | :-: | :-: | :-: |
 | **Risk** | **Likelihood** | **Impact** | **Mitigation** |
-| Tuple cardinality makes the counting pass exceed 1 GB RSS | Med | High | Compact keys; measure on the synthetic file in the first slice; raise as an eng-review item |
+| Tuple cardinality makes the counting pass exceed 1 GB RSS | Med | High | Pass 1 holds only compact tuple counts and the internal-host denominator; prevalence sets live in pass 2 for qualifying destinations only (eng-review F3); measured on the synthetic file in the first slice |
 | Flow exports split or merge connections, distorting intervals | Med | Med | Document "one flow ≈ one connection"; ignore zero-second intervals; state in help text |
 | Histogram capping alters scores for noisy tuples | Low | Low | Deterministic capping rule; property test that a true beacon scores the same capped or uncapped |
 | Formula fidelity to RITA is unverified beyond source reading | Med | Low | Call it "RITA-inspired" in docs; cross-check one tuple against RITA if fidelity matters later |
-| Prevalence misfires on small files (few internal hosts) | Med | Med | Show the host count in output; consider a minimum-host floor as an eng-review question |
-| Stdlib CSV parsing too slow for the 60 s target on older laptops | Med | Med | 2× headroom in the target; profile early; a single justified dependency is allowed by the constraints |
-| Stdin cannot be re-read for the two-pass `beacons` | High | Low | Spool stdin to a temp file for `beacons` only, or document the limitation (Open Question 4) |
+| Prevalence misfires on small files (few internal hosts) | Low | Med | Adjustment only when ≥ 10 internal hosts source outbound flows; hosts/total shown per row (eng-review F5) |
+| Stdlib CSV parsing too slow for the 60 s target on older laptops | Med | Med | Memoised validation (measured 11 s / 10 M rows); 2× headroom in the target; profile early; a single justified dependency is allowed by the constraints. Craig declined a CI perf canary (eng-review F10); the check stays manual before release |
+| Stdin cannot be re-read for the two-pass `beacons` | High | Low | `beacons -` is a usage error; stdin supported by the single-pass commands only (eng-review F4) |
 
 -----
 
@@ -345,36 +362,44 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | 1 | Target release date for v0.1? | Craig | Before slice stage | TBD |
 | 2 | Should `--exclude-port` / `--exclude-dst` ship in v0.1 or stay out? | Craig | Eng review | TBD (PRD assumes out) |
 | 3 | IPv6: accept and treat `fc00::/7`, `::1`, `fe80::/10` as internal by default, or IPv4 only in v0.1? | Craig | Eng review | TBD (PRD recommends accept) |
-| 4 | `beacons` from stdin: spool to a temp file, or reject `-` for that command? | eng-reviewer | Eng review | TBD (PRD recommends spool) |
-| 5 | Prevalence on small files: apply a minimum internal-host count before adjusting? | eng-reviewer | Eng review | TBD |
+| 4 | `beacons` from stdin: spool to a temp file, or reject `-` for that command? | eng-reviewer | Eng review | Resolved 2026-09-14: reject with exit 1 (eng-review F4) |
+| 5 | Prevalence on small files: apply a minimum internal-host count before adjusting? | eng-reviewer | Eng review | Resolved 2026-09-14: floor of 10 internal hosts; denominator defined in 6.4 (eng-review F5) |
 | 6 | Windows: test in CI or state unsupported? | Craig | Before release | TBD |
 
-15. Basic Test Cases
+## 14. Basic Test Cases
 
 |  |  |  |  |  |
 | :-: | :-: | :-: | :-: | :-: |
 | **#** | **Case** | **Expected Behavior** | **Observed Behavior** | **Pass/Fail** |
 | 1 | 12-row fixture, `top-talkers --limit 2` | Two heaviest sources by bytes, heaviest first |   |   |
 | 2 | Fixture with tcp/udp/icmp, `top-ports` | 443/tcp https, 53/udp dns; icmp absent; stderr count |   |   |
-| 3 | Planted 60 s ± 2 s beacon, 30 flows, `beacons` | Tuple ranks first; median interval 60 |   |   |
-| 4 | Planted beacon plus browser-noise host, `beacons` | No browser-host tuple in top 5 |   |   |
+| 3 | Planted 60 s ± 2 s beacon spanning the 24 h file (~1440 flows), `beacons` | Tuple ranks first; median interval 60; score ≥ 0.85 |   |   |
+| 4 | Planted beacon plus browser-noise host with ≥ 5 gate-passing tuples, `beacons` | No browser-host tuple in top 5 |   |   |
 | 5 | 3 malformed rows, each command | Completes; stderr `3 rows skipped`; exit 0 |   |   |
 | 6 | 3 malformed rows, `--json` | `jq .` parses; `meta.rows_skipped == 3`; nothing else on stdout |   |   |
 | 7 | Bad header | Exit 2; one-line message; no traceback |   |   |
+| 7a | BOM + valid header | Succeeds |   |   |
+| 7b | Header only, no data rows | Exit 0; empty results |   |   |
+| 7c | Epoch-milliseconds `ts` | Skipped row |   |   |
+| 7d | Undecodable byte in a field | Completes; no traceback |   |   |
+| 7e | Same host, 53/tcp and 53/udp regular flows, `beacons` | Two separate Tuples |   |   |
 | 8 | `--limit 0` | Exit 1 |   |   |
-| 9 | Row 41 earlier than row 40, `beacons` | Exit 2; message names row 41 |   |   |
-| 10 | Same file, `top-talkers` | Succeeds |   |   |
-| 11 | Perfectly regular 24 h tuple | Pre-prevalence score 1.000 |   |   |
-| 12 | Destination reached by 60 % of internal hosts | Score −0.15, floored at 0 |   |   |
-| 13 | Destination reached by 1 of 100 internal hosts | Score +0.15, capped at 1 |   |   |
+| 9 | Row 41 earlier than row 40 in the same Tuple, `beacons` | Exit 0; row dropped; stderr `1 rows out of order`; `meta.rows_out_of_order == 1` |   |   |
+| 9a | Interleaved Tuples, `beacons` | Nothing reported out of order |   |   |
+| 10 | Same file, `top-talkers` | Succeeds; order never checked |   |   |
+| 11 | 24 flows at 3600 s, equal sizes, spanning exactly the file | Pre-prevalence score 1.000 |   |   |
+| 12 | 100 internal hosts; destination reached by 60 of them | Score −0.15, floored at 0 |   |   |
+| 13 | 100 internal hosts; destination reached by 1 of them | Score +0.15, capped at 1; row shows `1/100` |   |   |
+| 13a | 2 internal hosts only | No prevalence adjustment; stderr notes the skip |   |   |
 | 14 | `--internal 203.0.113.0/24` | Sources in that range scored; RFC 1918 sources external |   |   |
 | 15 | Piped stdout | No escape sequences |   |   |
 | 16 | 1 GB synthetic file, all commands (manual) | ≤ 60 s / ≤ 60 s / ≤ 180 s; RSS < 1 GB; planted beacons in top 5 |   |   |
 
 -----
 
-## 14. References & Related Documents
+## 15. References & Related Documents
 
+- Engineering review: `docs/eng-review.md`
 - Research brief: `docs/research-brief.md`
 - Research findings and sources: `docs/research.md`
 - Glossary: `CONTEXT.md`

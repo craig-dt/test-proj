@@ -27,9 +27,15 @@ Any IP address that is not an Internal host.
 ### Analysis
 
 **Tuple**:
-The unit beacon scoring works on: one Internal host, one External host and one destination port. All flows
-from that source to that destination and port belong to the same Tuple.
+The unit beacon scoring works on: one Internal host, one External host, one destination port and one
+protocol. All flows from that source to that destination, port and protocol belong to the same Tuple; ICMP
+Tuples use port 0.
 _Avoid_: triad (RITA/Flare term), pair (which means source and destination only), connection key
+
+**Out-of-order row**:
+A Flow whose timestamp is earlier than the previous Flow of the same Tuple. Dropped from that Tuple's
+statistics and counted; never fatal. Interleaving between different Tuples is not out of order.
+_Avoid_: unsorted row, disorder
 
 **Pair**:
 A source host and a destination host regardless of port. Used by top-talkers, never by beacon scoring.
