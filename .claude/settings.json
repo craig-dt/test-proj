@@ -1,0 +1,35 @@
+{
+  "_comment": "Project-level hooks. Commands assume Python/uv/ruff/pytest — edit the two hook scripts for other stacks. guard-main is also installed globally; repeating it here means a clone on another machine still has it.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash .claude/hooks/guard-main.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "bash .claude/hooks/format.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash .claude/hooks/stop-gate.sh", "timeout": 600 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash .claude/hooks/stop-gate.sh", "timeout": 600 }
+        ]
+      }
+    ]
+  }
+}

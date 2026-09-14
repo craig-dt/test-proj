@@ -1,0 +1,27 @@
+# Derived by scripts/status.py from GitHub. Do not edit by hand; re-run the script.
+project: "test-proj"
+repo: "craig-dt/test-proj"
+milestone: "v0.1"
+current_stage: research
+notion_url: "https://app.notion.com/p/3db2a84a523081aa8932da6b9b33d209"
+prd_gdoc_url: ""
+verified: ""
+updated: "2026-09-14T15:28:51-07:00"
+stages:
+  research: pending
+  prd: pending
+  eng_review: pending
+  slice: pending
+  build: pending
+  verify: pending
+slices: {"total": 0, "closed": 0, "open": 0}
+ready: []
+in_progress: []
+pr_open: []
+failed: []
+needs_info: []
+human: []
+blocked: []
+open_prs:
+  - {"number": 1, "branch": "chore/init-pipeline", "url": "https://github.com/craig-dt/test-proj/pull/1", "ci": "green"}
+next: "/project:research <description>"
