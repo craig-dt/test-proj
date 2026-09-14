@@ -2,20 +2,20 @@
 project: "test-proj"
 repo: "craig-dt/test-proj"
 milestone: "v0.1"
-current_stage: research
+current_stage: prd
 notion_url: "https://app.notion.com/p/3db2a84a523081aa8932da6b9b33d209"
 prd_gdoc_url: ""
 verified: ""
-updated: "2026-09-14T15:28:51-07:00"
+updated: "2026-09-14T15:47:32-07:00"
 stages:
-  research: pending
+  research: completed
   prd: pending
   eng_review: pending
-  slice: pending
+  slice: completed
   build: pending
   verify: pending
-slices: {"total": 0, "closed": 0, "open": 0}
-ready: []
+slices: {"total": 1, "closed": 0, "open": 1}
+ready: [2]
 in_progress: []
 pr_open: []
 failed: []
@@ -23,5 +23,5 @@ needs_info: []
 human: []
 blocked: []
 open_prs:
-  - {"number": 1, "branch": "chore/init-pipeline", "url": "https://github.com/craig-dt/test-proj/pull/1", "ci": "green"}
-next: "/project:research <description>"
+  []
+next: "/project:prd <raw requirements>"
