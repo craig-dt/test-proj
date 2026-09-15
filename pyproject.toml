@@ -1,9 +1,19 @@
 [project]
-name = "test-proj"
+name = "flowtest"
 version = "0.1.0"
-description = "FILL_IN"
+description = "Offline triage of NetFlow-style CSV exports: top talkers, top ports, beacon detection."
 requires-python = ">=3.12"
 dependencies = []
+
+[project.scripts]
+flowtest = "flowtest.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flowtest"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]

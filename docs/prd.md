@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-14 | Craig | 0.3 | Slice 1 verify (PR #20 review): reader contract tightened. ICMP port always 0; plain-ASCII-digit numbers only; scoped IPv6 rejected; IPv4-mapped IPv6 unwrapped; CSV quoting disabled with one pair of surrounding quotes stripped per field. Every Table cell is sanitised before printing. |
 | 2026-09-14 | Craig | 0.2 | Eng-review changes: beacon fixture spans the file (F1); RITA guards written into the formula (F2); prevalence sets moved to pass 2 (F3); `beacons` rejects stdin (F4); prevalence denominator and 10-host floor (F5); protocol added to the Tuple (F6); per-Tuple order check with dropped rows counted (F7); timestamp, encoding and header rules (F8, F9); generator and reference-laptop spec (F11); echoed-text sanitising (F14); nits (F15). F10 and F13 declined. |
 
 -----
@@ -94,9 +95,10 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 - The header row is mandatory and must be exactly `ts,src_ip,dst_ip,dst_port,proto,bytes,packets` in that order, after stripping a UTF-8 byte-order mark and surrounding whitespace or carriage returns from each cell. Any other header is "input could not be read": exit code 2. A file with a valid header and no data rows is a success: exit 0, empty results.
 - The file is read as UTF-8 with the byte-order mark tolerated and undecodable bytes replaced, never raising. Any record the CSV reader itself rejects (for example an oversized field or unbalanced quotes) is a Skipped row. Row numbers in messages are the physical line number of the record's first line.
 - `ts` is ISO-8601 or Unix epoch seconds. Both may appear in the same file. Accepted ISO-8601 forms are exactly those Python's `datetime.fromisoformat` accepts, plus a trailing `Z`; a `T` or a space may separate date and time; an offset such as `+02:00` is converted to UTC; no zone means UTC. Epoch may carry a fractional part. Sub-second precision is truncated to whole seconds. A parsed timestamp outside [2000-01-01, 2100-01-01) is a Skipped row, so epoch milliseconds are rejected rather than silently stretching the file span.
-- `proto` is `tcp`, `udp` or `icmp`, case-insensitive. For `icmp`, `dst_port` may be empty or `0`.
-- `bytes` and `packets` are non-negative integers.
-- `src_ip` and `dst_ip` are IPv4 or IPv6 addresses (IPv6 handling is Open Question 3).
+- `proto` is `tcp`, `udp` or `icmp`, case-insensitive. For `icmp` the `dst_port` field is ignored and the Flow's port is always 0, whatever the export says (ICMP has no port; the glossary says ICMP Tuples use port 0). For `tcp` and `udp` the port is required, 0 to 65535.
+- `bytes`, `packets` and `dst_port` are non-negative integers written as plain ASCII digits only, at most 20 digits: no sign, no underscores, no exponent, no Unicode digits. Epoch timestamps likewise, with an optional `.` fraction.
+- `src_ip` and `dst_ip` are IPv4 or IPv6 addresses. IPv4-mapped IPv6 (`::ffff:10.0.0.1`) is the IPv4 host. Scoped IPv6 literals (`fe80::1%eth0`) are Skipped rows: flow exports never carry zone ids, and the zone text would otherwise reach the terminal unsanitised.
+- Fields may be padded with whitespace and may be wrapped in one pair of double quotes (fully quoted exports work). CSV quoting is otherwise disabled: no field in this contract can contain a comma or a newline, so a stray quote costs exactly one Skipped row and never swallows the rest of the file.
 - A row that violates any rule above is a Skipped row: counted, never fatal. At the end of the run stderr reports `N rows skipped`. Skipped rows do not change the exit code.
 - A file that cannot be opened, is completely empty (no header), or has a bad header exits with code 2. A usage error (bad flag, missing argument, non-positive `--limit`) exits with code 1. Success exits 0.
 - The input may be tens of millions of rows; no command loads the whole file.
