@@ -29,6 +29,11 @@ def build_parser() -> Parser:
     parser = Parser(
         prog="flowtest",
         description="Offline triage of NetFlow-style CSV exports: top talkers, top ports, beacons.",
+        epilog=(
+            "Tables are coloured only when stdout is a terminal; piped or redirected output is plain text. "
+            "Pass --no-color to any command, or set a non-empty NO_COLOR environment variable, to force "
+            "plain text. JSON output is never coloured."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"flowtest {tool_version()}")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
