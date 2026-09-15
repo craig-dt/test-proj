@@ -6,7 +6,7 @@ current_stage: build
 notion_url: "https://app.notion.com/p/3db2a84a523081aa8932da6b9b33d209"
 prd_gdoc_url: "https://docs.google.com/document/d/1K0F8D7LklE2uj1EC0L2ViIB0_eSi8ABgRqv9OAH7ixs/edit"
 verified: ""
-updated: "2026-09-14T16:51:24-07:00"
+updated: "2026-09-14T17:30:22-07:00"
 stages:
   research: completed
   prd: completed
@@ -14,14 +14,14 @@ stages:
   slice: completed
   build: pending
   verify: pending
-slices: {"total": 8, "closed": 0, "open": 8}
-ready: [15, 10, 9]
+slices: {"total": 8, "closed": 1, "open": 7}
+ready: [15, 13, 12, 11, 10]
 in_progress: []
 pr_open: []
 failed: []
 needs_info: []
 human: [16]
-blocked: [14, 13, 12, 11]
+blocked: [14]
 open_prs:
   []
 next: "scripts/agent-run.sh --milestone 'v0.1'"
