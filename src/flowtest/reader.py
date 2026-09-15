@@ -23,6 +23,10 @@ EXPECTED_HEADER = ("ts", "src_ip", "dst_ip", "dst_port", "proto", "bytes", "pack
 TS_MIN = 946_684_800  # 2000-01-01T00:00:00Z
 TS_MAX = 4_102_444_800  # 2100-01-01T00:00:00Z (exclusive)
 PROTOS = frozenset({"tcp", "udp", "icmp"})
+# Largest byte or packet count a Flow may carry. The beacon accumulator stores sizes in 64-bit signed
+# arrays and raises above this (flowtest.beacon.MAX_SIZE); bounding here makes a larger count one Skipped
+# row for every command instead of a crash in `beacons` (issue #14).
+COUNT_MAX = 2**63 - 1
 ECHO_LIMIT = 80
 # Only plain ASCII digits count as numbers: no sign, underscore, exponent or Unicode digits. At most 20
 # digits: far beyond any real counter, and it keeps int() away from Python's 4300-digit ValueError.
@@ -141,7 +145,7 @@ def parse_row(fields: list[str]) -> Flow | None:
             return None
     nbytes = _non_negative_int(fields[5])
     packets = _non_negative_int(fields[6])
-    if nbytes is None or packets is None:
+    if nbytes is None or packets is None or nbytes > COUNT_MAX or packets > COUNT_MAX:
         return None
     return Flow(ts, src, dst, port, proto, nbytes, packets)
 

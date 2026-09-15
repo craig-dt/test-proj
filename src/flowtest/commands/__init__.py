@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from flowtest.commands import top_ports, top_talkers
+from flowtest.commands import beacons, top_ports, top_talkers
 
-COMMANDS = (top_talkers, top_ports)
+COMMANDS = (top_talkers, top_ports, beacons)
