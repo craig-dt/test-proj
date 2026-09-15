@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-15 | Craig | 0.5 | Slice 7 verify (PR #27 review): reference input is 10 M rows (about 600 MB, 60 B/row), not "about 1 GB"; rows are the anchor for the time targets; a 16.5 M-row (~1 GB) stress run added to the release procedure for the memory bound. |
 | 2026-09-15 | Craig | 0.4 | Slice 3 verify (PR #23 review): `top-ports` JSON `meta` gains `flows_ignored_icmp` so scripts can see how many flows the ranking excluded; service table extended and sourced. |
 | 2026-09-14 | Craig | 0.3 | Slice 1 verify (PR #20 review): reader contract tightened. ICMP port always 0; plain-ASCII-digit numbers only; scoped IPv6 rejected; IPv4-mapped IPv6 unwrapped; CSV quoting disabled with one pair of surrounding quotes stripped per field. Every Table cell is sanitised before printing. |
 | 2026-09-14 | Craig | 0.2 | Eng-review changes: beacon fixture spans the file (F1); RITA guards written into the formula (F2); prevalence sets moved to pass 2 (F3); `beacons` rejects stdin (F4); prevalence denominator and 10-host floor (F5); protocol added to the Tuple (F6); per-Tuple order check with dropped rows counted (F7); timestamp, encoding and header rules (F8, F9); generator and reference-laptop spec (F11); echoed-text sanitising (F14); nits (F15). F10 and F13 declined. |
@@ -34,7 +35,7 @@ A day of enterprise flow is tens of millions of rows. Spreadsheets fail on it, a
 ## 2. Goals
 
 - **Goal 1 — Three answers from one CSV:** `top-talkers`, `top-ports` and `beacons` run over the 7-column CSV with no server, database or network access.
-- **Goal 2 — Laptop scale:** on a 1 GB CSV (about 10 million rows) on a 16 GB laptop, `top-talkers` and `top-ports` finish within 60 s, `beacons` within 180 s, and peak resident memory stays under 1 GB for every command.
+- **Goal 2 — Laptop scale:** on the 10 million-row reference CSV (about 600 MB; a 1 GB stress variant is 16.5 M rows) on a 16 GB laptop, `top-talkers` and `top-ports` finish within 60 s, `beacons` within 180 s, and peak resident memory stays under 1 GB for every command.
 - **Goal 3 — Beacon ranking that matches the textbook case:** a planted tuple connecting every 60 s ± 2 s for the whole span of a 24 h file (about 1440 flows) ranks first; a browser-like host with hundreds of irregular flows to many destinations, at least 5 of whose tuples pass the scoring gate, has no tuple in the top 5.
 - **Goal 4 — Robust to dirty exports:** malformed rows never abort a run; they are counted and reported on stderr, and the exit code stays 0.
 - **Goal 5 — Scriptable:** `--json` emits exactly one JSON object on stdout that `jq .` parses, with a `results` array and a `meta` object.
@@ -182,7 +183,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | US-03 | P0 | As a threat hunter, I want internal hosts calling out on a regular schedule ranked by a published score so that I can triage likely C2 first. | `beacons`, RITA v5 formula |
 | US-04 | P0 | As a SOC analyst, I want malformed rows counted and reported rather than fatal so that one bad line does not cost me the run. | stderr count, exit 0 |
 | US-05 | P0 | As a detection engineer, I want `--json` to emit one clean object so that I can pipe flowtest into `jq` and scripts. | `results` + `meta` |
-| US-06 | P0 | As a SOC analyst, I want a 1 GB export to finish in minutes without swapping so that the tool is usable on my laptop. | 60 s / 180 s / <1 GB RSS |
+| US-06 | P0 | As a SOC analyst, I want a day-sized export (10 M rows, about 600 MB) to finish in minutes without swapping so that the tool is usable on my laptop. | 60 s / 180 s / <1 GB RSS; 16.5 M-row (~1 GB) stress run recorded too |
 | US-07 | P1 | As a SOC analyst, I want to rank (source, destination) pairs so that I can see whether a suspicious tuple is also a heavy talker. | `--direction pair` |
 | US-08 | P1 | As a threat hunter at a site with public internal ranges, I want to tell flowtest which CIDRs are internal so that outbound detection is correct. | `--internal`, repeatable |
 | US-09 | P1 | As a detection engineer, I want `top-talkers` and `top-ports` to read from stdin so that flowtest fits in a pipeline. | `-` argument; not `beacons` (two passes) |
@@ -264,7 +265,8 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 ### US-06: Large file
 
-- Given the generated 10 M-row (~1 GB) synthetic file on a 16 GB laptop, when `top-talkers` and `top-ports` run, then each completes within 60 s with peak RSS under 1 GB.
+- Given the generated 10 M-row (about 600 MB) synthetic file on a 16 GB laptop, when `top-talkers` and `top-ports` run, then each completes within 60 s with peak RSS under 1 GB.
+- Given the 16.5 M-row (about 1 GB) stress variant, when all three commands run, then peak RSS stays under 1 GB and the wall times are recorded (no time target; the stress run measures the memory bound at roughly 2.5 M Tuples).
 - Given the same file, when `beacons` runs, then it completes within 180 s with peak RSS under 1 GB and the planted beacons rank in the top 5.
 
 ### US-07: Pair direction
@@ -319,10 +321,10 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 **Performance / Scale Requirements:**
 
-- Reference input: synthetic 10 M rows, about 1 GB, generated by a bundled seeded script with this shape: 500 Internal hosts; about 1.5 M distinct Outbound Tuples; 5 planted beacons with intervals between 30 s and 15 min, 5 to 10 % jitter, running the full 24 h span, each from a distinct Internal host to a destination no other host contacts; browser-like noise (many short-lived Tuples to many destinations, irregular intervals, varied sizes); an NTP-like Tuple from every Internal host to one shared destination every 15 min; 0.1 % malformed rows. The generator's parameters are documented so the shape can be varied.
+- Reference input: synthetic 10 M rows, about 600 MB (about 60 bytes per row with whole-second timestamps and IPv4 addresses; the PRD's earlier "about 1 GB" assumed 100-byte rows), generated by a bundled seeded script with this shape: 500 Internal hosts; about 1.5 M distinct Outbound Tuples; 5 planted beacons with intervals between 30 s and 15 min, 5 to 10 % jitter, running the full 24 h span, each from a distinct Internal host to a destination no other host contacts; browser-like noise (many short-lived Tuples to many destinations, irregular intervals, varied sizes); an NTP-like Tuple from every Internal host to one shared destination every 15 min; 0.1 % malformed rows. The generator's parameters are documented so the shape can be varied.
 - Reference laptop: Apple Silicon or recent x86-64, 16 GB RAM, SSD, Python 3.12 via `uv run`. The recorded numbers name the machine.
 - Timestamp and IP validation may be memoised by string value in the shared reader (eng-review F10 measured 27 s naive vs 11 s memoised per 10 M rows).
-- Targets: `top-talkers`, `top-ports` ≤ 60 s; `beacons` ≤ 180 s; peak RSS < 1 GB on a 16 GB laptop; no swapping.
+- Targets on the 10 M-row file: `top-talkers`, `top-ports` ≤ 60 s; `beacons` ≤ 180 s; peak RSS < 1 GB on a 16 GB laptop; no swapping. Every target is per-row work, so rows, not bytes, are the anchor. The release procedure also runs the 16.5 M-row (about 1 GB, about 2.5 M Tuples) stress variant once and records time and RSS; only the RSS bound applies to it.
 - Performance check is a documented manual step before release, recorded in the PR; CI runs the small fixtures only.
 
 -----
@@ -332,9 +334,9 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 |  |  |  |  |
 | :-: | :-: | :-: | :-: |
 | **Metric** | **Target** | **How Measured** | **Review Date** |
-| Wall time, 1 GB synthetic file, `top-talkers` and `top-ports` | ≤ 60 s each | `time` on the reference laptop, recorded in the release PR | v0.1 release |
-| Wall time, 1 GB synthetic file, `beacons` | ≤ 180 s | Same | v0.1 release |
-| Peak RSS, any command, 1 GB file | < 1 GB | `/usr/bin/time -l` (macOS) or `-v` (Linux) | v0.1 release |
+| Wall time, 10 M-row synthetic file, `top-talkers` and `top-ports` | ≤ 60 s each | `time` on the reference laptop, recorded in the release PR | v0.1 release |
+| Wall time, 10 M-row synthetic file, `beacons` | ≤ 180 s | Same | v0.1 release |
+| Peak RSS, any command, 10 M-row file and 16.5 M-row stress file | < 1 GB | `/usr/bin/time -l` (macOS) or `-v` (Linux) | v0.1 release |
 | Planted beacon rank on synthetic file | Every planted beacon in top 5 | Automated fixture test | Every CI run |
 | Browser-noise false positive | 0 browser-like tuples in top 5 | Automated fixture test | Every CI run |
 | Dirty-file completion | 100 % of commands exit 0 with correct skipped count | Automated fixture test | Every CI run |
@@ -396,7 +398,8 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | 13a | 2 internal hosts only | No prevalence adjustment; stderr notes the skip |   |   |
 | 14 | `--internal 203.0.113.0/24` | Sources in that range scored; RFC 1918 sources external |   |   |
 | 15 | Piped stdout | No escape sequences |   |   |
-| 16 | 1 GB synthetic file, all commands (manual) | ≤ 60 s / ≤ 60 s / ≤ 180 s; RSS < 1 GB; planted beacons in top 5 |   |   |
+| 16 | 10 M-row synthetic file, all commands (manual) | ≤ 60 s / ≤ 60 s / ≤ 180 s; RSS < 1 GB; planted beacons in top 5 |   |   |
+| 16a | 16.5 M-row (~1 GB) stress file, all commands (manual) | RSS < 1 GB; times recorded |   |   |
 
 -----
 

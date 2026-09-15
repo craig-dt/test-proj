@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import heapq
+import json
 import random
 import sys
 from collections.abc import Iterator
@@ -61,6 +62,14 @@ NOISE_MAX_GAP = 120
 NOISE_FIRST_OCTETS = (23, 34, 35, 44, 45, 52, 54, 64, 66, 69, 74, 104, 107, 108, 142, 151, 157, 162, 185, 199)
 NOISE_PORTS = ((443, "tcp", 62), (80, "tcp", 12), (53, "udp", 12), (8443, "tcp", 3), (0, "icmp", 1))
 MALFORMED_KINDS = 6
+# The reader accepts timestamps in [2000-01-01, 2100-01-01); the whole span must fit inside.
+START_MIN = 946_684_800
+START_MAX = 4_102_444_800 - SPAN
+
+
+def packets_for(nbytes: int) -> int:
+    """One packets formula for every row, so packet counts cannot fingerprint the planted beacons."""
+    return nbytes // 700 + 1
 
 
 class Params(NamedTuple):
@@ -85,10 +94,16 @@ class Beacon:
     schedule: tuple[int, ...]  # flow timestamps
 
     def sidecar(self) -> str:
-        return (
-            f'{{"src_ip": "{self.src_ip}", "dst_ip": "{self.dst_ip}", "dst_port": {self.dst_port}, '
-            f'"proto": "{self.proto}", "interval_s": {self.interval_s}, "jitter": {self.jitter:.3f}, '
-            f'"flows": {len(self.schedule)}}}'
+        return json.dumps(
+            {
+                "src_ip": self.src_ip,
+                "dst_ip": self.dst_ip,
+                "dst_port": self.dst_port,
+                "proto": self.proto,
+                "interval_s": self.interval_s,
+                "jitter": round(self.jitter, 3),
+                "flows": len(self.schedule),
+            }
         )
 
 
@@ -120,7 +135,7 @@ def beacon_rows(rng: random.Random, b: Beacon) -> Iterator[tuple[int, str]]:
     size = rng.randint(400, 1500)
     for ts in b.schedule:
         nbytes = size + rng.randint(-8, 8)
-        yield ts, f"{b.src_ip},{b.dst_ip},{b.dst_port},{b.proto},{nbytes},{nbytes // 100 + 1}"
+        yield ts, f"{b.src_ip},{b.dst_ip},{b.dst_port},{b.proto},{nbytes},{packets_for(nbytes)}"
 
 
 def ntp_rows(rng: random.Random, p: Params, hosts: list[str]) -> Iterator[tuple[int, str]]:
@@ -164,9 +179,8 @@ def noise_rows(rng: random.Random, p: Params, hosts: list[str], budget: int) -> 
         ts = start
         for _ in range(k):
             nbytes = int(lognormvariate(7.5, 1.6)) + 60
-            packets = nbytes // 700 + 1
             seq += 1
-            push(pending, (ts, seq, f"{src},{dst},{port_text},{proto},{nbytes},{packets}"))
+            push(pending, (ts, seq, f"{src},{dst},{port_text},{proto},{nbytes},{packets_for(nbytes)}"))
             ts = min(ts + min(int(expovariate(1 / NOISE_MEAN_GAP)), NOISE_MAX_GAP), last)
         consumed += k
     while pending:
@@ -199,29 +213,45 @@ def fixed_rows(p: Params) -> int:
     return p.hosts * (SPAN // NTP_INTERVAL)
 
 
-def iter_lines(p: Params) -> Iterator[str]:
-    """Header line, then exactly p.rows CSV lines in non-decreasing ts. Lazy."""
+def validate(p: Params) -> list[Beacon]:
+    """Check every parameter and return the planted beacons. Raises ShapeError before anything is written,
+    so a bad command line can never truncate an existing output file or leave a stale sidecar behind."""
     if p.rows <= 0 or p.hosts <= 0 or p.beacons < 0 or not 0 <= p.malformed_rate <= 1:
         raise ShapeError("rows and hosts must be positive, beacons non-negative, malformed rate in [0, 1]")
     if p.beacons > p.hosts:
         raise ShapeError(f"beacons ({p.beacons}) cannot exceed hosts ({p.hosts}): one beacon per host")
     if not 0 <= p.jitter_min <= p.jitter_max < 1:
         raise ShapeError("jitter must satisfy 0 <= jitter-min <= jitter-max < 1")
-    rng = random.Random(p.seed)
-    hosts = internal_hosts(p.hosts)
-    beacons = plan_beacons(rng, p, hosts)
+    if not START_MIN <= p.start <= START_MAX:
+        raise ShapeError(
+            f"start ({p.start}) must be an epoch second between {START_MIN} and {START_MAX} so the 24 h span "
+            "stays inside the timestamp range the flowtest reader accepts (2000-01-01 to 2100-01-01)"
+        )
+    beacons = planted_beacons(p)
     fixed = fixed_rows(p) + sum(len(b.schedule) for b in beacons)
     if p.rows < fixed:
         raise ShapeError(
             f"rows ({p.rows}) too few for {p.hosts} hosts and {p.beacons} beacons over 24 h: at least {fixed} "
             "rows are NTP and beacon flows; raise --rows or lower --hosts/--beacons"
         )
+    return beacons
+
+
+def iter_lines(p: Params) -> Iterator[str]:
+    """Header line, then exactly p.rows CSV lines in non-decreasing ts. Lazy."""
+    beacons = validate(p)
+    rng = random.Random(p.seed)
+    hosts = internal_hosts(p.hosts)
+    plan_beacons(rng, p, hosts)  # advance the seeded generator exactly as planted_beacons() did
+    fixed = fixed_rows(p) + sum(len(b.schedule) for b in beacons)
     yield from _lines(rng, p, hosts, beacons, p.rows - fixed)
 
 
 def _lines(
     rng: random.Random, p: Params, hosts: list[str], beacons: list[Beacon], budget: int
 ) -> Iterator[str]:
+    # The one structure that grows with rows: rows * malformed_rate indices (10 k at the reference 10 M rows,
+    # about 100 MB at a 10^9-row request). Exact counts matter for the tests, so it stays a set.
     bad_rows = set(rng.sample(range(p.rows), round(p.rows * p.malformed_rate)))
     streams = [ntp_rows(random.Random(rng.random()), p, hosts)]
     streams += [beacon_rows(random.Random(rng.random()), b) for b in beacons]
@@ -245,7 +275,9 @@ def planted_beacons(p: Params) -> list[Beacon]:
 
 
 def write(p: Params, out: IO[str], beacons_out: IO[str]) -> None:
-    for b in planted_beacons(p):
+    """Sidecar first, then the CSV. Callers validate before opening files; validate() here is cheap and
+    keeps the library entry point safe on its own."""
+    for b in validate(p):
         beacons_out.write(b.sidecar() + "\n")
     beacons_out.flush()
     lines = iter_lines(p)
@@ -285,7 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--start",
         type=int,
         default=DEFAULT_START,
-        help="epoch seconds of the first row (2026-09-14T00:00:00Z)",
+        help=(
+            "epoch seconds of the first row (default 2026-09-14T00:00:00Z); must leave the 24 h span inside "
+            "the reader's 2000-01-01 to 2100-01-01 window"
+        ),
     )
     ap.add_argument("--output", default="-", help="CSV path, or - for stdout (default -)")
     ap.add_argument(
@@ -307,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         start=args.start,
     )
     try:
+        validate(p)  # before any file is opened: a typo must never truncate the previous reference file
         with ExitStack() as stack:
             out = sys.stdout
             if args.output != "-":

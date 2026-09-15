@@ -123,7 +123,7 @@ def test_about_a_tenth_of_a_percent_malformed(synth):
 def test_malformed_rate_is_a_parameter_and_every_malformed_row_is_really_skipped(gen, tmp_path):
     """A 5 % rate on 60 k rows makes 3 000 Skipped rows of several kinds; every kind must fail the reader
     (an out-of-range port on an ICMP row, for example, would not)."""
-    out, side = generate(gen, tmp_path, 3, rows=60_000)
+    out, side = tmp_path / "rate.csv", tmp_path / "rate.jsonl"
     code = run_main(
         gen, "--rows", "60000", "--seed", "3", "--malformed-rate", "0.05",
         "--output", str(out), "--beacons-out", str(side),
@@ -174,7 +174,7 @@ def test_five_planted_beacons_with_stated_interval_and_jitter(synth):
 
 
 def test_beacon_count_and_hosts_are_parameters(gen, tmp_path):
-    out, side = generate(gen, tmp_path, 5, rows=120_000)
+    out, side = tmp_path / "small.csv", tmp_path / "small.jsonl"
     code = run_main(
         gen, "--rows", "120000", "--seed", "5", "--hosts", "40", "--beacons", "2",
         "--output", str(out), "--beacons-out", str(side),
@@ -257,10 +257,52 @@ def test_defaults_write_csv_to_stdout_and_beacons_to_stderr(gen, capsys):
     assert len([json.loads(line) for line in captured.err.splitlines() if line.strip()]) == BEACONS
 
 
-def test_too_few_rows_for_the_shape_is_a_usage_error(gen, capsys):
-    code = run_main(gen, "--rows", "10", "--seed", "1")
+@pytest.mark.parametrize(
+    ("argv", "word"),
+    [
+        (("--rows", "10"), "rows"),
+        (("--rows", "60000", "--hosts", "0"), "hosts"),
+        (("--rows", "60000", "--beacons", "-1"), "beacons"),
+        (("--rows", "60000", "--hosts", "3", "--beacons", "5"), "beacons"),
+        (("--rows", "60000", "--jitter-min", "0.2", "--jitter-max", "0.1"), "jitter"),
+        (("--rows", "60000", "--start", "100"), "start"),
+        (("--rows", "60000", "--start", "4102444800"), "start"),
+    ],
+)
+def test_invalid_parameters_are_one_line_usage_errors(gen, capsys, argv, word):
+    # Review F2: these used to surface as raw tracebacks from random.sample or produce unreadable files.
+    code = run_main(gen, *argv, "--seed", "1")
+    err = capsys.readouterr().err
     assert code == 1
-    assert "rows" in capsys.readouterr().err
+    assert word in err and "Traceback" not in err
+    assert err.count("\n") == 1
+
+
+def test_usage_error_never_touches_existing_output_files(gen, tmp_path, capsys):
+    # Review F1: validation happens before any file is opened, so a typo cannot truncate the previous
+    # reference file or leave a sidecar describing beacons that were never generated.
+    out, side = tmp_path / "ref.csv", tmp_path / "ref.jsonl"
+    out.write_text("precious\n")
+    side.write_text('{"keep": true}\n')
+    code = run_main(gen, "--rows", "10", "--seed", "1", "--output", str(out), "--beacons-out", str(side))
+    assert code == 1
+    assert out.read_text() == "precious\n"
+    assert side.read_text() == '{"keep": true}\n'
+    assert "{" not in capsys.readouterr().err, "no sidecar lines on stderr either"
+
+
+def test_sidecar_is_valid_json_with_the_documented_keys(synth):
+    _, side, _, _ = synth
+    for b in planted(side):
+        assert set(b) == {"src_ip", "dst_ip", "dst_port", "proto", "interval_s", "jitter", "flows"}
+
+
+def test_beacon_and_noise_rows_share_one_packets_formula(synth):
+    _, side, flows, _ = synth
+    beacon_dsts = {b["dst_ip"] for b in planted(side)}
+    for f in flows:
+        if f.dst_ip in beacon_dsts or f.proto != "icmp":
+            assert f.packets == f.bytes // 700 + 1
 
 
 def test_help_documents_every_parameter_and_runs_standalone():
@@ -269,5 +311,5 @@ def test_help_documents_every_parameter_and_runs_standalone():
     )
     assert proc.returncode == 0
     for flag in ("--rows", "--seed", "--hosts", "--beacons", "--jitter-min", "--jitter-max",
-                 "--malformed-rate", "--output", "--beacons-out"):  # fmt: skip
+                 "--malformed-rate", "--start", "--output", "--beacons-out"):  # fmt: skip
         assert flag in proc.stdout, flag
