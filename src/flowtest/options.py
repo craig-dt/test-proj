@@ -28,13 +28,18 @@ def positive_int(raw: str) -> int:
 
 
 def add_common(parser: argparse.ArgumentParser, *, allow_stdin: bool = True) -> None:
-    """The options every command shares: the input, --limit and --json."""
+    """The options every command shares: the input, --limit, --json and --no-color."""
     file_help = "CSV path" + (", or - for stdin" if allow_stdin else "")
     parser.add_argument("file", help=file_help)
     parser.add_argument(
         "--limit", type=positive_int, default=20, metavar="N", help="rows to show (default 20)"
     )
     parser.add_argument("--json", action="store_true", help="emit one JSON object instead of a table")
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="plain table even on a terminal (a non-empty NO_COLOR environment variable does the same)",
+    )
 
 
 def build_meta(command: str, source: str, stats: ReadStats, start: float) -> dict[str, Any]:

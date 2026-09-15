@@ -85,5 +85,6 @@ def run(args: argparse.Namespace, start: float) -> int:
         results=results,
         meta=build_meta(NAME, args.file, stats, start),
         stats=stats,
+        no_color=args.no_color,
     )
     return 0
