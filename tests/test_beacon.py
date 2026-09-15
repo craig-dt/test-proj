@@ -72,6 +72,7 @@ def test_thirty_flow_burst_in_a_day_is_scorable_but_loses_histogram_and_duration
     assert result.histogram == 0.0 and result.duration == 0.0
     assert result.interval > 0.9 and result.size > 0.9
     # Documented outcome: a short burst tops out near 0.5 because half the score needs span coverage.
+    # The exact value is seed-specific (other seeds land 0.44 to 0.49); it is pinned to catch formula drift.
     assert result.score == 0.485
 
 
@@ -291,3 +292,40 @@ def test_prevalence_rejects_impossible_counts():
         adjust_for_prevalence(0.5, hosts_to_dst=11, internal_hosts_total=10)
     with pytest.raises(ValueError):
         adjust_for_prevalence(0.5, hosts_to_dst=0, internal_hosts_total=10)
+
+
+# --- verify-review edge cases (PR #24, R4 / R5) ---------------------------------------------------
+
+
+def test_zero_length_file_span_is_not_scorable():
+    # Every flow in the same second: no non-zero Interval, and no span to bin over.
+    assert score_tuple([5, 5, 5, 5], [1, 1, 1, 1], 5, 5) is None
+
+
+def test_timestamp_before_file_start_is_rejected():
+    ts = regular(10, 60, start=100)
+    with pytest.raises(ValueError, match="before the file span start"):
+        score_tuple(ts, [1] * 10, 200, DAY)
+
+
+def test_unordered_timestamps_name_the_offending_pair():
+    with pytest.raises(ValueError, match="non-decreasing"):
+        score_tuple([0, 60, 30, 90], [1] * 4, 0, DAY)
+
+
+@pytest.mark.parametrize("span", [1, 5, 23, 25, 97, 86399, 86401, 10**9 + 7])
+def test_last_timestamp_lands_in_bin_23_for_any_span(span):
+    # Bin assignment is integer floor((ts - first) * 24 / span); a flow at exactly file_last must be in
+    # bin 23, never a 25th bin, whether or not the span divides by 24.
+    from flowtest.beacon import BINS, _bin_counts
+
+    counts = _bin_counts([0, span], 0, span)
+    assert len(counts) == BINS
+    assert counts[0] == 1 and counts[BINS - 1] == 1
+
+
+def test_no_adjustment_path_still_rounds_and_clamps():
+    result = adjust_for_prevalence(0.98765, hosts_to_dst=1, internal_hosts_total=3)
+    assert result == (0.988, False, 0.0)
+    result = adjust_for_prevalence(1.2, hosts_to_dst=1, internal_hosts_total=3)
+    assert result.score == 1.0

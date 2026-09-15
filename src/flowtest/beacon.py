@@ -57,7 +57,11 @@ def _skew_term(values: Sequence[int]) -> float:
 
 
 def _dispersion_term(values: Sequence[int], median: float, *, default: float) -> float:
-    """(median - MAD) / median, floored at 0; `default` when the median is below 1."""
+    """(median - MAD) / median, floored at 0; `default` when the median is below 1.
+
+    For Intervals the default branch is unreachable with whole-second timestamps (a non-zero Interval
+    is at least 1), and exists for formula fidelity only. It is reachable for byte sizes.
+    """
     if median < 1:
         return default
     mad = statistics.median(abs(v - median) for v in values)
@@ -109,13 +113,13 @@ def _check_inputs(timestamps: Sequence[int], sizes: Sequence[int], file_first: i
         raise ValueError(f"{len(timestamps)} timestamps but {len(sizes)} byte counts")
     if file_last < file_first:
         raise ValueError(f"file span ends ({file_last}) before it starts ({file_first})")
-    previous = file_first
-    for ts in timestamps:
-        if ts < previous:
-            raise ValueError("timestamps must be ordered and inside the file span")
-        previous = ts
+    if timestamps and timestamps[0] < file_first:
+        raise ValueError(f"first timestamp {timestamps[0]} is before the file span start {file_first}")
+    for a, b in pairwise(timestamps):
+        if b < a:
+            raise ValueError(f"timestamps must be in non-decreasing order ({b} follows {a})")
     if timestamps and timestamps[-1] > file_last:
-        raise ValueError("timestamps must be ordered and inside the file span")
+        raise ValueError(f"last timestamp {timestamps[-1]} is after the file span end {file_last}")
 
 
 def score_tuple(
@@ -123,9 +127,10 @@ def score_tuple(
 ) -> BeaconScore | None:
     """Score one Tuple. None means not scorable (fewer than 3 non-zero Intervals).
 
-    `timestamps` are the Tuple's flow timestamps in order (epoch seconds), `sizes` the matching byte
-    counts, and [file_first, file_last] is the whole file's time span. Raises ValueError on inputs
-    that break the contract: unordered timestamps, timestamps outside the span, mismatched lengths.
+    `timestamps` are the Tuple's flow timestamps in order as whole epoch seconds (`int`, as the reader
+    emits them; floats are not supported), `sizes` the matching byte counts, and [file_first, file_last]
+    is the whole file's time span. Raises ValueError on inputs that break the contract: unordered
+    timestamps, timestamps outside the span, mismatched lengths.
     """
     _check_inputs(timestamps, sizes, file_first, file_last)
     intervals = [b - a for a, b in pairwise(timestamps) if b != a]
@@ -153,7 +158,8 @@ def adjust_for_prevalence(score: float, *, hosts_to_dst: int, internal_hosts_tot
             f"hosts_to_dst must be in 1..internal_hosts_total, got {hosts_to_dst}/{internal_hosts_total}"
         )
     if internal_hosts_total < PREVALENCE_MIN_HOSTS:
-        return PrevalenceResult(score, False, 0.0)
+        # Same post-condition as the in-force path: clamped, 3 dp.
+        return PrevalenceResult(round(_clamp(score), 3), False, 0.0)
     # Integer comparisons: hosts / total <= 2 % is hosts * 100 <= total * 2, exactly at the boundary.
     if hosts_to_dst * 100 <= internal_hosts_total * LOW_PREVALENCE_PERCENT:
         delta = PREVALENCE_DELTA
