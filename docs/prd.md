@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-15 | Craig | 0.4 | Slice 3 verify (PR #23 review): `top-ports` JSON `meta` gains `flows_ignored_icmp` so scripts can see how many flows the ranking excluded; service table extended and sourced. |
 | 2026-09-14 | Craig | 0.3 | Slice 1 verify (PR #20 review): reader contract tightened. ICMP port always 0; plain-ASCII-digit numbers only; scoped IPv6 rejected; IPv4-mapped IPv6 unwrapped; CSV quoting disabled with one pair of surrounding quotes stripped per field. Every Table cell is sanitised before printing. |
 | 2026-09-14 | Craig | 0.2 | Eng-review changes: beacon fixture spans the file (F1); RITA guards written into the formula (F2); prevalence sets moved to pass 2 (F3); `beacons` rejects stdin (F4); prevalence denominator and 10-host floor (F5); protocol added to the Tuple (F6); per-Tuple order check with dropped rows counted (F7); timestamp, encoding and header rules (F8, F9); generator and reference-laptop spec (F11); echoed-text sanitising (F14); nits (F15). F10 and F13 declined. |
 
@@ -155,7 +156,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 **Key Business Rules / Logic:**
 
 - **Table output** (default): header row, column-aligned, numbers right-aligned, byte totals in human units (`1.2 GB`). Colour (bold header, highlighted first row) only when stdout is a TTY; plain text when piped or redirected. `--no-color` forces plain text; the `NO_COLOR` environment variable is honoured.
-- **JSON output** (`--json`): exactly one JSON object on stdout, nothing else. Shape: `{"results": [...], "meta": {...}}`. `meta` contains `command`, `input` (path or `-`), `rows` (rows read), `rows_skipped`, `elapsed_s`, `version`, and for `beacons` also `rows_out_of_order`, `internal_hosts_total` and `prevalence_applied` (boolean). Numbers are raw integers or floats, never formatted strings. Skipped-row and informational messages still go to stderr.
+- **JSON output** (`--json`): exactly one JSON object on stdout, nothing else. Shape: `{"results": [...], "meta": {...}}`. `meta` contains `command`, `input` (path or `-`), `rows` (rows read), `rows_skipped`, `elapsed_s`, `version`; for `top-ports` also `flows_ignored_icmp` (the icmp flows excluded from the ranking); and for `beacons` also `rows_out_of_order`, `internal_hosts_total` and `prevalence_applied` (boolean). Numbers are raw integers or floats, never formatted strings. Skipped-row and informational messages still go to stderr.
 - `--version` prints the tool version from the package metadata (the package is named `flowtest`); `--help` documents every command and flag.
 - Any input text echoed in a message (header cells, offending row fragments) is truncated to 80 characters and stripped of control characters before printing, so a crafted CSV cannot inject terminal escape sequences into logs.
 
