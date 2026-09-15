@@ -65,11 +65,13 @@ def run(args: argparse.Namespace, start: float) -> int:
         }
         for (port, proto), (flows, nbytes) in ranked
     ]
+    meta = build_meta(NAME, args.file, stats, start)
+    meta["flows_ignored_icmp"] = icmp_ignored  # the one number that changes what `results` means
     emit(
         as_json=args.json,
         columns=COLUMNS,
         results=[_json_row(r) for r in results] if args.json else results,
-        meta=build_meta(NAME, args.file, stats, start),
+        meta=meta,
         stats=stats,
         no_color=args.no_color,
     )

@@ -26,8 +26,10 @@ def test_fixture_shows_service_names_and_ignores_icmp(run, twelve):
     by_port = {row["port"]: row for row in rows}
     assert by_port["443/tcp"]["service"] == "https"
     assert by_port["53/udp"]["service"] == "dns"
-    assert not any("icmp" in row["port"] or row["port"].startswith("0/") for row in rows)
+    assert all(row["port"].endswith(("/tcp", "/udp")) for row in rows)
     assert "1 icmp flows ignored" in r.err
+    # 12 fixture flows minus the one icmp flow are ranked; pinned through JSON (raw integers).
+    assert sum(x["flows"] for x in run("top-ports", str(twelve), "--json").json()["results"]) == 11
 
 
 def test_ranking_is_by_flow_count_not_bytes(run, twelve):
@@ -130,10 +132,26 @@ def test_same_port_on_tcp_and_udp_are_separate_rows(run, csv_file):
         "2026-09-14T18:00:02Z,10.0.0.1,203.0.113.9,53,udp,100,1\n"
     )
     r = run("top-ports", str(csv_file(text)), "--json")
-    assert [(x["port"], x["proto"], x["flows"]) for x in r.json()["results"]] == [
-        (53, "udp", 2),
-        (53, "tcp", 1),
+    assert [(x["port"], x["proto"], x["flows"], x["service"]) for x in r.json()["results"]] == [
+        (53, "udp", 2, "dns"),
+        (53, "tcp", 1, "dns"),
     ]
+
+
+def test_equal_flows_on_the_same_port_order_tcp_before_udp(run, csv_file):
+    text = HEADER + (
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,53,udp,100,1\n"
+        "2026-09-14T18:00:01Z,10.0.0.1,203.0.113.9,53,tcp,100,1\n"
+    )
+    r = run("top-ports", str(csv_file(text)), "--json")
+    assert [(x["port"], x["proto"]) for x in r.json()["results"]] == [(53, "tcp"), (53, "udp")]
+
+
+def test_json_meta_carries_the_icmp_count(run, twelve):
+    r = run("top-ports", str(twelve), "--json")
+    assert r.json()["meta"]["flows_ignored_icmp"] == 1
+    r = run("top-ports", str(twelve), "--proto", "tcp", "--json")
+    assert r.json()["meta"]["flows_ignored_icmp"] == 1
 
 
 def test_proto_icmp_is_a_usage_error(run, twelve):
@@ -172,12 +190,31 @@ def test_bad_header_exits_2(run, csv_file):
     assert r.code == 2 and r.out == "" and "Traceback" not in r.err
 
 
-def test_service_table_is_built_in_and_covers_the_named_ports():
-    """No external lookup, ever: the table is a plain module constant."""
-    from flowtest.services import service_name
-
-    assert service_name(443, "tcp") == "https"
-    assert service_name(53, "udp") == "dns"
-    assert service_name(53, "tcp") == "dns"
-    assert service_name(123, "udp") == "ntp"
-    assert service_name(44444, "tcp") is None
+def test_service_table_covers_common_triage_ports(run, csv_file):
+    # Through the CLI: the table is built in, keyed by protocol, and knows the ports analysts hit daily.
+    cases = [
+        (5353, "udp", "mdns"),
+        (5355, "udp", "llmnr"),
+        (1900, "udp", "ssdp"),
+        (3478, "udp", "stun"),
+        (1080, "tcp", "socks"),
+        (4444, "tcp", "metasploit"),
+        (9001, "tcp", "tor-orport"),
+        (11211, "tcp", "memcached"),
+        (2375, "tcp", "docker"),
+        (6443, "tcp", "kubernetes"),
+        (623, "udp", "ipmi"),
+        (162, "udp", "snmptrap"),
+        (1813, "udp", "radius-acct"),
+        (5061, "tcp", "sips"),
+        (853, "udp", "dns-over-quic"),
+        (853, "tcp", "dns-over-tls"),
+        (8888, "tcp", "http-alt"),
+        (44444, "tcp", None),
+    ]
+    text = HEADER + "".join(
+        f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,{port},{proto},100,1\n" for port, proto, _ in cases
+    )
+    r = run("top-ports", str(csv_file(text)), "--json", "--limit", "50")
+    got = {(x["port"], x["proto"]): x["service"] for x in r.json()["results"]}
+    assert got == {(port, proto): name for port, proto, name in cases}
