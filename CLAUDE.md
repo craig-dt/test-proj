@@ -1,15 +1,19 @@
 # Project: test-proj
 
-FILL_IN: one-paragraph description of what this project does and for whom.
+flowtest: an offline, stdlib-only Python CLI for a SOC analyst holding a NetFlow-style CSV export. Three commands answer who talks most (`top-talkers`), which ports are in play (`top-ports`) and which internal hosts call out on a suspiciously regular schedule (`beacons`, RITA-inspired scoring). Tens of millions of rows, never the whole file in memory.
 
 ## Commands
 - Install: uv sync
 - Test:    uv run pytest -q
 - Lint:    uv run ruff check . && uv run ruff format --check .
-- Run:     FILL_IN after the first slice lands
+- Run:     uv run flowtest <top-talkers|top-ports|beacons> <file.csv> [--json] (see `--help`)
 
 ## Architecture
-- FILL_IN after the first slices land (entry point, module boundaries, where logic vs IO lives). Keep to 5 lines.
+- Entry point `flowtest.cli:main`; each command is a module under `flowtest/commands/` registered in `commands/__init__.py`.
+- `reader.py` streams Flows one at a time and owns the whole input contract (PRD 6.1); commands never parse CSV.
+- `render.py` owns Table/JSON output and colour; every cell is sanitised there.
+- `beacon.py` is the pure scoring library (formula, guards, reservoir accumulator); `commands/beacons.py` is the two-pass driver.
+- `scripts/gen_flows.py` generates the reference input; `tests/` exercise the public CLI only.
 
 ## Agent skills
 ### Issue tracker

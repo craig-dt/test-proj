@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-15 | Craig | 0.8 | Final verify pass: recorded implementation decisions (blank lines, exit-2 causes, IP order, SI bytes, top-ports tie and `dst_port` key, gate on accepted count, `--internal` masking, JSON rounding); `docs/spec.md` reference removed; OQ 2 and 6 resolved. Open: the 16.5 M-row RSS bound is predicted to fail (#30); decision pending #16. |
 | 2026-09-15 | Craig | 0.7 | Slice 6 verify (PR #35 review): `bytes`/`packets` bounded at 2^63 − 1 (6.1); out-of-order rule is against the previous accepted flow and the stderr line prints only when non-zero (6.4). |
 | 2026-09-15 | Craig | 0.6 | Issue #29: Section 10 records the bounded-memory technique for `beacons` pass 2: a 1000-element reservoir sample of Intervals and byte sizes per Tuple, exact at or below 1000 flows, a fair (uniformly sampled) estimate above. No acceptance-criteria changes. |
 | 2026-09-15 | Craig | 0.5 | Slice 7 verify (PR #27 review): reference input is 10 M rows (about 600 MB, 60 B/row), not "about 1 GB"; rows are the anchor for the time targets; a 16.5 M-row (~1 GB) stress run added to the release procedure for the memory bound. |
@@ -102,9 +103,10 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 - `proto` is `tcp`, `udp` or `icmp`, case-insensitive. For `icmp` the `dst_port` field is ignored and the Flow's port is always 0, whatever the export says (ICMP has no port; the glossary says ICMP Tuples use port 0). For `tcp` and `udp` the port is required, 0 to 65535.
 - `bytes`, `packets` and `dst_port` are non-negative integers written as plain ASCII digits only, at most 20 digits and, for `bytes` and `packets`, at most 2^63 − 1 (9,223,372,036,854,775,807; anything larger is a Skipped row so the scoring library's 64-bit storage can never overflow): no sign, no underscores, no exponent, no Unicode digits. Epoch timestamps likewise, with an optional `.` fraction.
 - `src_ip` and `dst_ip` are IPv4 or IPv6 addresses. IPv4-mapped IPv6 (`::ffff:10.0.0.1`) is the IPv4 host. Scoped IPv6 literals (`fe80::1%eth0`) are Skipped rows: flow exports never carry zone ids, and the zone text would otherwise reach the terminal unsanitised.
+- A completely empty line is neither a row nor a Skipped row (it is ignored, so trailing newlines cost nothing); a line containing only whitespace is a Skipped row.
 - Fields may be padded with whitespace and may be wrapped in one pair of double quotes (fully quoted exports work). CSV quoting is otherwise disabled: no field in this contract can contain a comma or a newline, so a stray quote costs exactly one Skipped row and never swallows the rest of the file.
 - A row that violates any rule above is a Skipped row: counted, never fatal. At the end of the run stderr reports `N rows skipped`. Skipped rows do not change the exit code.
-- A file that cannot be opened, is completely empty (no header), or has a bad header exits with code 2. A usage error (bad flag, missing argument, non-positive `--limit`) exits with code 1. Success exits 0.
+- A file that cannot be opened, is completely empty (no header), or has a bad header exits with code 2. So does an I/O error while reading, and, for `beacons`, a file whose timestamps moved outside the span seen in pass 1 (the file changed between the two reads). A closed output pipe (`| head`) exits 0. A usage error (bad flag, missing argument, non-positive `--limit`) exits with code 1. Success exits 0.
 - The input may be tens of millions of rows; no command loads the whole file.
 
 ### 6.2 `top-talkers`
@@ -115,8 +117,9 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 - `--by` selects the ranking measure: total bytes (default), total packets or flow count. The other two measures are shown alongside.
 - `--direction src` (default) ranks source hosts; `dst` ranks destination hosts; `pair` ranks (source, destination) Pairs.
-- `--limit` defaults to 20 and must be a positive integer.
-- Ties break by key ascending (IP address order, then destination for pairs) so output is deterministic.
+- `--limit` defaults to 20 and must be a positive integer in plain ASCII digits (every numeric flag follows the CSV fields' digit rule).
+- Ties break by key ascending in IP address order (IPv4 addresses before IPv6, then numeric; then destination for pairs) so output is deterministic. Pairs are directed: A to B and B to A are separate rows.
+- Byte totals in Table output use SI units (1000-based): 1 200 000 000 bytes is `1.2 GB`.
 - All flows count, including icmp and internal-to-internal.
 
 ### 6.3 `top-ports`
@@ -125,10 +128,10 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 **Key Business Rules / Logic:**
 
-- Ranking is by flow count; ties break by port number ascending.
+- Ranking is by flow count; ties break by port number ascending, then `tcp` before `udp`.
 - `--proto` restricts to tcp or udp; default is both, reported as separate rows (`443/tcp`, `53/udp`).
 - icmp flows are ignored by this command and stderr reports how many were ignored.
-- Well-known ports show a service name in Table output from a built-in table (for example `443 https`); no external lookup. Unknown ports show a blank name. JSON output carries the name as a nullable field.
+- Well-known ports show a service name in Table output from a built-in table (for example `443 https`); no external lookup. Unknown ports show a blank name. JSON output carries the name as a nullable `service` field and the port as `dst_port` (the same key `beacons` uses and the CSV header name).
 - `--limit` defaults to 20 and must be a positive integer.
 
 ### 6.4 `beacons`
@@ -137,9 +140,9 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 
 **Key Business Rules / Logic:**
 
-- **Candidates.** Only Outbound flows are considered: source is an Internal host, destination is an External host. Internal hosts are, by default, RFC 1918 ranges, IPv4 loopback and link-local, and IPv6 `fc00::/7`, `::1` and `fe80::/10`. `--internal <CIDR>` (repeatable, either address family) replaces the default list for the run.
+- **Candidates.** Only Outbound flows are considered: source is an Internal host, destination is an External host. Internal hosts are, by default, RFC 1918 ranges, IPv4 loopback and link-local, and IPv6 `fc00::/7`, `::1` and `fe80::/10`. `--internal <CIDR>` (repeatable, either address family) replaces the default list for the run; a bare address means a /32 or /128, and host bits in a prefix are masked off (`10.0.0.5/8` is `10.0.0.0/8`).
 - **Grouping.** Scoring is per Tuple: (source, destination, destination port, protocol). `53/tcp` and `53/udp` to the same host are different Tuples. ICMP Outbound flows form Tuples with port 0 and are scored like any other.
-- **Gate.** A Tuple is scored only if it has at least `--min-flows` flows (default 10) and at least 3 non-zero Intervals. The default stays at 10 rather than the 20 used by CV-only tools (eng-review F13) because the four-signal score, unlike CV alone, is not carried by count, and a 10-minute capture of a 60 s beacon should still surface; the analyst raises it on noisy files. Zero-second Intervals (several flows in the same second) are ignored by the interval statistics but counted as flows.
+- **Gate.** A Tuple is scored only if it has at least `--min-flows` flows (default 10) and at least 3 non-zero Intervals. The flow gate is applied to the pass-1 count and again to the accepted count after out-of-order rows are dropped. The default stays at 10 rather than the 20 used by CV-only tools (eng-review F13) because the four-signal score, unlike CV alone, is not carried by count, and a 10-minute capture of a 60 s beacon should still surface; the analyst raises it on noisy files. Zero-second Intervals (several flows in the same second) are ignored by the interval statistics but counted as flows.
 - **Input order.** Order matters only within a Tuple. A flow whose `ts` is earlier than the previous *accepted* flow of the same Tuple is an out-of-order row: it is dropped from that Tuple's statistics and counted (so a single far-future timestamp early in a Tuple drops every later row of that Tuple). At the end of the run stderr reports `N rows out of order (dropped from beacon scoring)` only when N is non-zero (unlike the skipped-row line, which always prints), and the JSON `meta` always carries `rows_out_of_order`. The run completes with exit 0. Global interleaving between Tuples (normal for flow collectors) is not an error. Only `beacons` checks order. Caution for the analyst: a heavily shuffled file scores on a fraction of its data; the stderr count is the only warning.
 - **Analysis span.** The whole file. The hourly histogram uses 24 bins spread evenly across the file's time span (one bin per hour when the span is 24 h; wider bins for longer spans, narrower for shorter).
 - **Beacon score** follows RITA v5 (see ADR 0001 and `docs/research.md`). Four sub-scores, each clamped to [0, 1], averaged with equal weights of 0.25. Guards below are RITA's and are part of the requirement, not implementation detail:
@@ -149,7 +152,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
   4. **Duration coverage:** the larger of (Tuple time span / file time span) and (longest run of consecutive non-empty bins / 12), each capped at 1, only when the Tuple appears in at least 6 bins; otherwise 0.
 - **Bins.** The file span is [first ts, last ts] over all rows read. Bin width = span / 24. A flow at exactly the last timestamp belongs to bin 23, never to a 25th bin.
 - **Prevalence adjustment.** Prevalence of a destination = (distinct Internal hosts with at least one Outbound flow to that destination) / (distinct Internal hosts that are the source of at least one Outbound flow anywhere in the file). The adjustment applies only when the denominator is at least 10; below that no adjustment is made and stderr says so once. Score +0.15 when Prevalence ≤ 2 %, −0.15 when Prevalence ≥ 50 %, then clamped to [0, 1].
-- **Output.** All qualifying Tuples ranked by score descending, cut by `--limit` (default 20). Ties break by Tuple key ascending. Each row shows: source, destination, port/proto, flows, median Interval in seconds, the four sub-scores, Prevalence as hosts-to-destination over total internal hosts (for example `3/412`), and the final score to three decimals. JSON results carry `prevalence` as a fraction and `hosts_to_dst`; `meta` carries `internal_hosts_total`.
+- **Output.** All qualifying Tuples ranked by score descending, cut by `--limit` (default 20). Ties break by Tuple key ascending. Each row shows: source, destination, port/proto, flows, median Interval in seconds, the four sub-scores, Prevalence as hosts-to-destination over total internal hosts (for example `3/412`), and the final score to three decimals. JSON results carry `prevalence` as a fraction rounded to 4 decimals, `hosts_to_dst`, and `median_interval_s` as a float (a sample median over an even count can end in .5); `meta` carries `internal_hosts_total`.
 - No Tuple is ever labelled a beacon; the score is the whole verdict.
 
 ### 6.5 Output rendering
@@ -308,7 +311,7 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 - Single-pass streaming aggregation for `top-talkers` and `top-ports`; state is one counter per key.
 - `beacons` is two passes over the input. Pass 1 keeps only a flow count per Tuple under a compact key, plus the set of all Internal hosts that source at least one Outbound flow (the Prevalence denominator). Pass 2 keeps full state only for Tuples meeting the gate, and builds the per-destination Internal-host sets only for destinations of those Tuples. Nothing whose size grows with distinct source–destination pairs may live in pass 1 (eng-review F3).
 - Interval and byte-size statistics are computed from a **1000-element reservoir sample per Tuple** (Vitter's Algorithm R, seeded from the Tuple key so a run is reproducible for a given Python version), so memory is bounded by the number of qualifying Tuples, not rows (eng-review F12; decision in #29). Per Tuple, pass 2 holds at most 1000 non-zero Intervals, 1000 byte sizes, the 24 bin counts, the first and last timestamp and the flow count. The result is exact for Tuples with at most 1000 flows and a fair (uniformly sampled) estimate above; the median Interval shown is the sample median. The scoring gate (at least 3 non-zero Intervals) uses the true count, never the sample. Histogram shape and duration coverage use exact counts and are unaffected by sampling.
-- The scoring formula is defined in Section 6.4 and ADR 0001; how it is computed is for `docs/spec.md`.
+- The scoring formula is defined in Section 6.4 and ADR 0001; how it is computed is documented in the code (`src/flowtest/beacon.py` module and function docstrings). There is no separate spec document.
 
 **Dependencies (internal and external):**
 
@@ -367,11 +370,11 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | :-: | :-: | :-: | :-: | :-: |
 | **#** | **Question** | **Owner** | **Target Date** | **Resolution** |
 | 1 | Target release date for v0.1? | Craig | Before slice stage | TBD |
-| 2 | Should `--exclude-port` / `--exclude-dst` ship in v0.1 or stay out? | Craig | Eng review | TBD (PRD assumes out) |
+| 2 | Should `--exclude-port` / `--exclude-dst` ship in v0.1 or stay out? | Craig | Eng review | Resolved 2026-09-15: out of v0.1, not built; prevalence is the only suppression (Out of Scope table) |
 | 3 | IPv6: accept and treat `fc00::/7`, `::1`, `fe80::/10` as internal by default, or IPv4 only in v0.1? | Craig | Eng review | Resolved 2026-09-14 at slicing: accept IPv6; those ranges plus RFC 1918, IPv4 loopback and link-local are Internal by default (slice #14) |
 | 4 | `beacons` from stdin: spool to a temp file, or reject `-` for that command? | eng-reviewer | Eng review | Resolved 2026-09-14: reject with exit 1 (eng-review F4) |
 | 5 | Prevalence on small files: apply a minimum internal-host count before adjusting? | eng-reviewer | Eng review | Resolved 2026-09-14: floor of 10 internal hosts; denominator defined in 6.4 (eng-review F5) |
-| 6 | Windows: test in CI or state unsupported? | Craig | Before release | TBD |
+| 6 | Windows: test in CI or state unsupported? | Craig | Before release | Resolved 2026-09-15: unsupported in v0.1 (Non-Goals); terminal-colour tests skip there; follow-up in #28 |
 
 ## 14. Basic Test Cases
 
