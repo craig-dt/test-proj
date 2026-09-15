@@ -23,6 +23,7 @@ from itertools import pairwise
 from typing import NamedTuple
 
 BINS = 24  # hourly histogram over the file span, whatever the span's length
+MAX_SIZE = 2**63 - 1  # reservoirs are array('q'); the reader admits up to 20 digits, so bound here too
 RESERVOIR_SIZE = 1000  # Intervals and byte sizes kept per Tuple; exact at or below, a fair sample above
 MIN_INTERVALS = 3  # non-zero Intervals needed before a Tuple is scorable
 MIN_OCCUPIED_BINS = 6  # duration coverage counts only when the Tuple appears in this many bins
@@ -96,7 +97,9 @@ class TupleAccumulator:
     version. [file_first, file_last] is the whole file's span from pass 1. Reservoir replacement is
     Vitter's Algorithm R. `add` raises ValueError on the same contract breaches as `score_tuple`; the
     command checks `last` before calling `add` to spot and drop Out-of-order rows, so `flows` counts
-    accepted flows only and may be lower than the pass-1 count.
+    accepted flows only and may be lower than the pass-1 count. Byte counts must be 0..MAX_SIZE (2^63 - 1):
+    the reader admits up to 20-digit numbers, so the command must treat larger sizes as Skipped rows
+    (issue #14). All checks run before any mutation.
 
     Memory is the point of this class (PRD 10, eng-review F12): reservoirs and bins are compact
     `array('q')`, the random generator is created only when a reservoir first overflows (about 500 of
@@ -154,6 +157,9 @@ class TupleAccumulator:
             reservoir[slot] = value
 
     def add(self, ts: int, size: int) -> None:
+        # Every check happens before any mutation, so a rejected flow leaves the state untouched.
+        if not 0 <= size <= MAX_SIZE:
+            raise ValueError(f"byte count {size} is outside 0..{MAX_SIZE}")
         if ts < self._file_first:
             raise ValueError(f"timestamp {ts} is before the file span start {self._file_first}")
         if ts > self._file_last:
