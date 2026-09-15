@@ -27,3 +27,8 @@ already recognise its numbers, and every part of it can be computed in a streami
 - Scores are "RITA-inspired", not RITA-compatible: RITA groups by host pair and reads Zeek connection logs;
   flowtest groups by (source, destination, port) and reads flow records. Documentation must say so.
 - Changing the formula later changes every score analysts have learned; treat as a breaking change.
+- Interval and byte-size statistics are computed from a 1000-element reservoir sample per Tuple (PRD
+  section 10, issue #29). Scores for Tuples with at most 1000 flows are exact; for Tuples above 1000 flows
+  the interval and size sub-scores and the median Interval are sample-based (unbiased, reproducible run to
+  run because the sample is seeded from the Tuple key). The histogram and duration sub-scores and the gate
+  are always exact.
