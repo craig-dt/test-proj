@@ -94,7 +94,7 @@ def emit(
     results: list[dict[str, Any]],
     meta: dict[str, Any],
     stats: ReadStats,
-    no_color: bool = False,
+    no_color: bool,  # required on purpose: a command that forgets it fails its first test, not the analyst
     out: IO[str] | None = None,
     err: IO[str] | None = None,
 ) -> None:

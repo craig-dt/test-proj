@@ -7,8 +7,11 @@ made by the real isatty() check rather than a mock.
 from __future__ import annotations
 
 import os
+import select
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +19,8 @@ import pytest
 from conftest import ANSI, HEADER
 
 pty = pytest.importorskip("pty")  # POSIX only; Windows is nice-to-have per PRD 6.6
+
+TTY_DEADLINE_S = 20.0
 
 
 @dataclass
@@ -43,32 +48,61 @@ def run_piped(*argv: str, **env: str) -> Captured:
     return Captured(proc.returncode, proc.stdout, proc.stderr)
 
 
-def run_tty(*argv: str, **env: str) -> Captured:
-    """Run the CLI with stdout on a pseudo-terminal; stderr is a plain pipe."""
+def run_tty(*argv: str, stderr_on_tty: bool = False, **env: str) -> Captured:
+    """Run the CLI with stdout on a pseudo-terminal.
+
+    stderr is a plain pipe by default (drained on a thread so it can never deadlock); with
+    ``stderr_on_tty`` it shares the pseudo-terminal, which is how a real terminal session looks.
+    Every read has a deadline and the child is killed on expiry, so a hang fails fast instead of
+    stalling CI.
+    """
     master, slave = pty.openpty()
     proc = subprocess.Popen(
         [sys.executable, "-m", "flowtest.cli", *argv],
         stdin=subprocess.DEVNULL,
         stdout=slave,
-        stderr=subprocess.PIPE,
+        stderr=slave if stderr_on_tty else subprocess.PIPE,
         env=_env(**env),
     )
     os.close(slave)
+
+    err_chunks: list[bytes] = []
+    drain: threading.Thread | None = None
+    if proc.stderr is not None:
+        drain = threading.Thread(target=lambda: err_chunks.append(proc.stderr.read()), daemon=True)
+        drain.start()
+
     chunks: list[bytes] = []
+    deadline = time.monotonic() + TTY_DEADLINE_S
     try:
         while True:
-            data = os.read(master, 65536)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                raise TimeoutError(f"CLI produced no EOF on the pty within {TTY_DEADLINE_S}s")
+            ready, _, _ = select.select([master], [], [], remaining)
+            if not ready:
+                continue
+            try:
+                data = os.read(master, 65536)
+            except OSError:  # EIO once the child has closed its end
+                break
             if not data:
                 break
             chunks.append(data)
-    except OSError:  # EIO once the child has closed its end
-        pass
     finally:
         os.close(master)
-    _, err = proc.communicate(timeout=30)
+        try:
+            proc.wait(timeout=TTY_DEADLINE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        if drain is not None:
+            drain.join(timeout=TTY_DEADLINE_S)
     # The terminal driver turns "\n" into "\r\n" on output; undo that so lines compare to piped output.
     out = b"".join(chunks).decode("utf-8").replace("\r\n", "\n")
-    return Captured(proc.returncode, out, err.decode("utf-8"))
+    err = b"".join(err_chunks).decode("utf-8")
+    return Captured(proc.returncode, out, err)
 
 
 def strip_ansi(text: str) -> str:
@@ -95,7 +129,27 @@ def test_tty_colours_header_and_first_result_only_and_keeps_content(twelve: Path
     assert not ANSI.search(lines[2]) and not ANSI.search(lines[3]), "other rows stay plain"
 
     assert strip_ansi(tty.out) == plain.out
-    assert not ANSI.search(tty.err)
+
+
+def test_stderr_is_never_coloured_even_on_a_tty(twelve: Path):
+    # stderr shares the pseudo-terminal here, so a coloured summary line would show up in the capture.
+    tty = run_tty("top-talkers", str(twelve), stderr_on_tty=True)
+    assert tty.code == 0
+    merged_lines = tty.out.splitlines()
+    summary = [ln for ln in merged_lines if ln.endswith("rows skipped")]
+    assert summary == ["0 rows skipped"], "summary line must be present and plain"
+    coloured = [ln for ln in merged_lines if ANSI.search(ln)]
+    assert len(coloured) == 2, "only the header and the first result carry escapes"
+
+
+def test_every_command_honours_no_color_on_a_tty(twelve: Path):
+    # Guards the shared-renderer promise: each registered command must pass --no-color through.
+    from flowtest.commands import COMMANDS
+
+    for module in COMMANDS:
+        r = run_tty(module.NAME, str(twelve), "--no-color")
+        assert r.code == 0, f"{module.NAME} failed under --no-color: {r.err}"
+        assert not ANSI.search(r.out), f"{module.NAME} coloured a TTY despite --no-color"
 
 
 def test_no_color_flag_on_tty_is_plain(twelve: Path):
