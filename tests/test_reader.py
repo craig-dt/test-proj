@@ -160,6 +160,32 @@ def test_only_plain_ascii_digits_are_numbers(csv_file, row):
     assert stats.skipped == 1
 
 
+@pytest.mark.parametrize("column", ["dst_port", "bytes", "packets", "ts"])
+def test_absurdly_long_numbers_are_skipped_not_fatal(csv_file, column):
+    # Re-review: int() refuses > 4300 digits with ValueError; must be a Skipped row, never a traceback.
+    # Also pins the 20-digit cap: anything longer is not a number this contract accepts.
+    fields = {
+        "ts": "2026-09-14T18:00:00Z",
+        "src_ip": "10.0.0.1",
+        "dst_ip": "203.0.113.9",
+        "dst_port": "443",
+        "proto": "tcp",
+        "bytes": "1",
+        "packets": "1",
+    }
+    fields[column] = "9" * 5000
+    row = ",".join(fields.values())
+    _, stats = read_all(csv_file(HEADER + row + "\n"))
+    assert stats.skipped == 1 and stats.rows == 1
+
+
+def test_twenty_digit_numbers_are_the_limit(csv_file):
+    ok = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{'9' * 20},1\n"
+    too_long = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{'9' * 21},1\n"
+    assert read_all(csv_file(ok))[1].skipped == 0
+    assert read_all(csv_file(too_long, name="b.csv"))[1].skipped == 1
+
+
 def test_icmp_port_is_normalised_to_zero(csv_file):
     text = HEADER + "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,icmp,1,1\n"
     flows, stats = read_all(csv_file(text))

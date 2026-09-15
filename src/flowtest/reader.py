@@ -24,9 +24,10 @@ TS_MIN = 946_684_800  # 2000-01-01T00:00:00Z
 TS_MAX = 4_102_444_800  # 2100-01-01T00:00:00Z (exclusive)
 PROTOS = frozenset({"tcp", "udp", "icmp"})
 ECHO_LIMIT = 80
-# Only plain ASCII digits count as numbers: no sign, underscore, exponent or Unicode digits.
-_DIGITS = re.compile(r"[0-9]+")
-_EPOCH = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# Only plain ASCII digits count as numbers: no sign, underscore, exponent or Unicode digits. At most 20
+# digits: far beyond any real counter, and it keeps int() away from Python's 4300-digit ValueError.
+_DIGITS = re.compile(r"[0-9]{1,20}")
+_EPOCH = re.compile(r"[0-9]{1,20}(?:\.[0-9]+)?")
 
 
 def clean_field(raw: str) -> str:

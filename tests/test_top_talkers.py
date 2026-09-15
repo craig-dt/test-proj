@@ -138,10 +138,13 @@ def test_usage_error_exit_1(run):
     assert r.code == 1
 
 
-def test_version_flag(run):
+def test_version_flag_comes_from_package_metadata(run):
+    from importlib import metadata
+
     r = run("--version")
     assert r.code == 0
-    assert r.out.strip().startswith("flowtest 0.")
+    assert r.out.strip() == f"flowtest {metadata.version('flowtest')}"
+    assert "unknown" not in r.out
 
 
 def test_default_limit_is_twenty(run, csv_file):
