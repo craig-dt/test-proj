@@ -153,11 +153,26 @@ def test_different_tuple_keys_draw_different_samples():
 
 
 def test_seed_does_not_depend_on_process_hash_randomisation():
-    # str keys hash differently per process; the reservoir must not. Pin the sample for one key.
+    # str keys hash differently per process; the reservoir must not. A literal pins the sample, so a
+    # regression to hash()-based seeding (which would still agree with itself within one process) fails.
     ts = regular(50, 60)
     state = accumulate(ts, list(range(50)), 0, DAY, key="pinned", capacity=5)
-    assert len(state.sizes) == 5 and set(state.sizes) <= set(range(50))
-    assert state.sizes == accumulate(ts, list(range(50)), 0, DAY, key="pinned", capacity=5).sizes
+    assert state.sizes == [22, 12, 40, 35, 4]
+
+
+def test_pinned_sample_survives_a_different_hash_seed_in_a_subprocess():
+    import subprocess
+    import sys
+
+    code = (
+        "from flowtest.beacon import TupleAccumulator\n"
+        "acc = TupleAccumulator('pinned', 0, 86400, capacity=5)\n"
+        "for i in range(50): acc.add(i * 60, i)\n"
+        "print(acc.state().sizes)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                         env={"PYTHONHASHSEED": "12345", "PATH": ""})  # fmt: skip
+    assert out.stdout.strip() == "[22, 12, 40, 35, 4]"
 
 
 # --- bounded state and speed (AC 3) --------------------------------------------------------------
@@ -177,7 +192,9 @@ def test_hundred_thousand_flows_keep_the_state_bounded_and_fast():
     assert len(state.sizes) == RESERVOIR_SIZE
     assert len(state.bins) == BINS == 24
     assert (state.first, state.last, state.flows) == (0, acc.last, 100_000)
-    assert elapsed < 1.0, f"100k flows took {elapsed:.2f}s"
+    assert elapsed < 3.0, (
+        f"100k flows took {elapsed:.2f}s"
+    )  # ~0.1 s locally; wide margin for loaded CI runners
 
 
 def test_reservoir_holds_everything_until_it_is_full_then_stays_at_capacity():
@@ -300,3 +317,56 @@ def test_accumulator_exposes_the_last_timestamp_for_order_checks():
     assert acc.last is None
     acc.add(60, 1)
     assert acc.last == 60
+
+
+# --- memory: the reason this API exists (review F1/F2) --------------------------------------------
+
+
+def test_accumulator_costs_about_a_kilobyte_not_four():
+    """The reference file has ~330 k gate-passing Tuples; at 4.3 KB each (an eager Random per
+    accumulator) pass 2 alone was 1.4 GB. Lazy RNG + array storage + __slots__ must keep a 16-flow
+    accumulator well under 2 KB, so 330 k of them stay under ~600 MB."""
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        accs = []
+        for i in range(2000):
+            acc = TupleAccumulator(("10.0.0.1", "203.0.113.9", 443, "tcp", i), 0, DAY)
+            for k in range(16):
+                acc.add(k * 60, 100 + k)
+            accs.append(acc)
+        current, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    per_accumulator = current / len(accs)
+    assert per_accumulator < 2000, f"{per_accumulator:.0f} bytes per 16-flow accumulator"
+
+
+def test_random_generator_is_created_only_when_a_reservoir_overflows():
+    acc = TupleAccumulator(KEY, 0, DAY, capacity=5)
+    for i in range(5):
+        acc.add(i * 60, i)
+    assert acc._rng is None
+    acc.add(5 * 60, 5)
+    assert acc._rng is not None
+
+
+@pytest.mark.parametrize("span", [1, 5, 23, 25, 97, 86399, 86401, 10**9 + 7])
+def test_accumulator_bins_match_the_full_array_path_for_awkward_spans(span):
+    ts = sorted({0, span // 3, span // 2, (2 * span) // 3, span})
+    sizes = [100] * len(ts)
+    exact = score_tuple(ts, sizes, 0, span)
+    sampled = score_state(accumulate(ts, sizes, 0, span))
+    assert exact == sampled
+    state = accumulate(ts, sizes, 0, span)
+    assert state.bins[23] >= 1 and sum(state.bins) == len(ts)
+
+
+def test_contract_errors_name_the_timestamp_not_first_or_last():
+    acc = TupleAccumulator(KEY, 100, DAY)
+    acc.add(100, 1)
+    with pytest.raises(ValueError, match="^timestamp 50 is before the file span start 100$"):
+        acc.add(50, 1)
+    with pytest.raises(ValueError, match="^timestamp 90000 is after the file span end 86400$"):
+        acc.add(90000, 1)
