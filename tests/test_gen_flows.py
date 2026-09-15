@@ -120,8 +120,15 @@ def test_about_a_tenth_of_a_percent_malformed(synth):
     assert stats.skipped == round(ROWS * 0.001)
 
 
-def test_malformed_rows_are_varied_not_one_kind(gen, tmp_path):
-    out, _ = generate(gen, tmp_path, 3, rows=60_000)
+def test_malformed_rate_is_a_parameter_and_every_malformed_row_is_really_skipped(gen, tmp_path):
+    """A 5 % rate on 60 k rows makes 3 000 Skipped rows of several kinds; every kind must fail the reader
+    (an out-of-range port on an ICMP row, for example, would not)."""
+    out, side = generate(gen, tmp_path, 3, rows=60_000)
+    code = run_main(
+        gen, "--rows", "60000", "--seed", "3", "--malformed-rate", "0.05",
+        "--output", str(out), "--beacons-out", str(side),
+    )  # fmt: skip
+    assert code == 0
     from flowtest.reader import parse_row
 
     bad = []
@@ -132,7 +139,7 @@ def test_malformed_rows_are_varied_not_one_kind(gen, tmp_path):
             if parse_row(fields) is None:
                 bad.append(fields)
     kinds = {"columns" if len(f) != 7 else "ts" if not f[0][:4].isdigit() else "other" for f in bad}
-    assert len(bad) == 60 and len(kinds) >= 2
+    assert len(bad) == 3_000 and len(kinds) == 3
 
 
 # --- planted beacons ---------------------------------------------------------------------------------------

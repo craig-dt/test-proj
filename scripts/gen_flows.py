@@ -156,7 +156,7 @@ def noise_rows(rng: random.Random, p: Params, hosts: list[str], budget: int) -> 
         while pending and pending[0][0] <= start:
             ts, _, line = pop(pending)
             yield ts, line
-        k = min(1 + int(expovariate(1 / (NOISE_MEAN_FLOWS - 1))), NOISE_MAX_FLOWS, budget - consumed)
+        k = min(1 + round(expovariate(1 / (NOISE_MEAN_FLOWS - 1))), NOISE_MAX_FLOWS, budget - consumed)
         src = choice(hosts)
         dst = f"{choice(octets)}.{randint(0, 255)}.{randint(0, 255)}.{randint(1, 254)}"
         port, proto, _ = choice(ports)
@@ -189,6 +189,8 @@ def corrupt(kind: int, ts_text: str, tail: str) -> str:
         fields[3] = "gre"  # unknown protocol
     else:
         fields[2] = "70000"  # port out of range
+        if fields[3] == "icmp":
+            fields[3] = "tcp"  # the reader ignores ICMP ports, so make the port count
     return ts_text + "," + ",".join(fields)
 
 
