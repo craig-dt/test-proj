@@ -44,6 +44,12 @@ DIRTY_ROWS = HEADER + (
 ANSI = re.compile(r"\x1b\[")
 
 
+def rows_of(table: str) -> list[list[str]]:
+    """Split a Table output into whitespace-separated cells, skipping the header line."""
+    lines = [ln for ln in table.splitlines() if ln.strip()]
+    return [ln.split() for ln in lines[1:]]
+
+
 @dataclass
 class Result:
     code: int

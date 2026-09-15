@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import ANSI, HEADER
-
-
-def rows_of(table: str) -> list[list[str]]:
-    """Split a Table output into whitespace-separated cells, skipping the header line."""
-    lines = [ln for ln in table.splitlines() if ln.strip()]
-    return [ln.split() for ln in lines[1:]]
+from conftest import ANSI, HEADER, rows_of
 
 
 def test_limit_two_heaviest_by_bytes(run, twelve):

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from conftest import HEADER
-from test_top_talkers import rows_of
+import json
+
+from conftest import HEADER, rows_of
 
 # Pairs in the 12-row fixture (bytes / packets / flows):
 #   10.0.0.1 -> 203.0.113.9   4000 / 20 / 2
@@ -80,9 +81,30 @@ def test_pair_ties_order_by_source_then_destination_in_ip_order(run, csv_file):
     ]
 
 
-def test_pair_json_results_carry_src_ip_and_dst_ip_and_parse(run, twelve):
-    import json
+def test_pair_ties_across_address_families_put_ipv4_before_ipv6(run, csv_file):
+    # ip_sort_key orders by (family, numeric value): every IPv4 source sorts before any IPv6 source, and
+    # the destination only decides when sources are equal.
+    text = HEADER + (
+        "2026-09-14T18:00:00Z,fd00::2,2001:db8::1,443,tcp,100,1\n"
+        "2026-09-14T18:00:01Z,192.168.1.1,10.0.0.1,443,tcp,100,1\n"
+        "2026-09-14T18:00:02Z,10.0.0.1,2001:db8::9,443,tcp,100,1\n"
+        "2026-09-14T18:00:03Z,10.0.0.1,203.0.113.9,443,tcp,100,1\n"
+    )
+    r = run("top-talkers", str(csv_file(text)), "--direction", "pair", "--json")
+    assert pairs_of(r) == [
+        ("10.0.0.1", "203.0.113.9"),  # same IPv4 source: IPv4 destination before IPv6 destination
+        ("10.0.0.1", "2001:db8::9"),
+        ("192.168.1.1", "10.0.0.1"),
+        ("fd00::2", "2001:db8::1"),  # IPv6 source last
+    ]
 
+
+def test_pair_help_says_pairs_are_directed(run):
+    r = run("top-talkers", "--help")
+    assert "directed" in r.out and "B->A" in r.out
+
+
+def test_pair_json_results_carry_src_ip_and_dst_ip_and_parse(run, twelve):
     r = run("top-talkers", str(twelve), "--direction", "pair", "--json")
     assert r.code == 0
     # Whole stdout is exactly one JSON object: the same parse an analyst's `jq .` does.
