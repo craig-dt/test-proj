@@ -179,7 +179,7 @@ def test_absurdly_long_numbers_are_skipped_not_fatal(csv_file, column):
     assert stats.skipped == 1 and stats.rows == 1
 
 
-def test_twenty_digit_numbers_are_the_limit(csv_file):
+def test_twenty_digit_counts_exceed_count_max_and_are_skipped(csv_file):
     ok = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,{'9' * 20}\n"
     too_long = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,{'9' * 21}\n"
     # 20 digits is the parse limit; a 20-digit count is at least 10^19 and so above COUNT_MAX (2^63 - 1),

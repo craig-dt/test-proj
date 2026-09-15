@@ -343,7 +343,18 @@ def test_pass_one_holds_only_counts_and_the_internal_host_set(csv_file):
     assert pass_one.internal_hosts == {"10.0.0.1"}
     assert (pass_one.file_first, pass_one.file_last) == (START, START + 49_999)
     assert pass_one.stats.rows == 50_000
-    assert peak < 60 * 2**20, f"pass 1 peaked at {peak / 2**20:.1f} MB for 50 k Tuples"
+    # Retained bytes per Tuple in the pass-1 table (dict slot + packed key + small int). The peak above
+    # also counts the reader's bounded caches, so the retained size is the discriminating number: a
+    # tuple-of-strings key measured about 210 B and a per-destination set would add far more.
+    import sys
+
+    counts = pass_one.counts
+    retained = sys.getsizeof(counts) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in counts.items())
+    per_tuple = retained / len(counts)
+    assert per_tuple < 160, f"pass 1 retains {per_tuple:.0f} B per Tuple"
+    assert peak < 60 * 2**20, (
+        f"pass 1 peaked at {peak / 2**20:.1f} MB for 50 k Tuples (reader caches included)"
+    )
 
 
 def test_fifty_thousand_single_flow_tuples_give_an_empty_ranking(run, csv_file):
@@ -423,3 +434,88 @@ def test_help_explains_the_two_pass_read_and_short_bursts(run):
     assert "--min-flows" in text and "--internal" in text
     assert "twice" in text
     assert "burst" in text  # US-03: short bursts score lower because histogram and duration need coverage
+
+
+# --- verify-review additions (PR #35) -------------------------------------------------------------
+
+
+def test_min_flows_below_four_creates_no_accumulator_for_unscorable_tuples(csv_file):
+    """--min-flows 1 must not allocate pass-2 state for Tuples that can never have 3 non-zero Intervals
+    (review F2); the ranking is identical, only the memory differs."""
+    from flowtest.commands.beacons import DEFAULT_INTERNAL, HostClassifier, accumulate, count_tuples
+
+    lines = [row(START + i, "10.0.0.1", f"203.0.113.{1 + i % 200}", 443, "tcp") for i in range(600)]
+    path = write(csv_file, lines)  # 200 Tuples with 3 flows each
+    hosts = HostClassifier(DEFAULT_INTERNAL)
+    pass_two = accumulate(str(path), hosts, count_tuples(str(path), hosts), min_flows=1)
+    assert pass_two.accumulators == {} and pass_two.hosts_to_dst == {}
+
+
+def test_pass_one_counts_are_freed_before_pass_two_allocates(csv_file, monkeypatch):
+    from flowtest.commands import beacons
+
+    lines = [row(START + i * 60, "10.0.0.1", "203.0.113.9", 443, "tcp") for i in range(20)]
+    path = write(csv_file, lines)
+    hosts = beacons.HostClassifier(beacons.DEFAULT_INTERNAL)
+    pass_one = beacons.count_tuples(str(path), hosts)
+    assert len(pass_one.counts) == 1
+    seen_counts_len = []
+    real = beacons.TupleAccumulator
+
+    class Spy(real):
+        __slots__ = ()
+
+        def __init__(self, *a, **k):
+            seen_counts_len.append(len(pass_one.counts))
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(beacons, "TupleAccumulator", Spy)
+    beacons.accumulate(str(path), hosts, pass_one, min_flows=10)
+    assert seen_counts_len == [0], "the pass-1 table must be empty before any accumulator exists"
+
+
+def test_file_that_grows_between_the_passes_exits_2(run, csv_file, monkeypatch):
+    from flowtest.commands import beacons
+
+    lines = [row(START + i * 60, "10.0.0.1", "203.0.113.9", 443, "tcp") for i in range(20)]
+    path = write(csv_file, lines)
+    real_read = beacons.read_flows
+    calls = {"n": 0}
+
+    def grow_then_read(source):
+        calls["n"] += 1
+        if calls["n"] == 2:  # between pass 1 and pass 2: a row lands outside the recorded span
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(row(START + 10 * 86400, "10.0.0.1", "203.0.113.9", 443, "tcp") + "\n")
+        return real_read(source)
+
+    monkeypatch.setattr(beacons, "read_flows", grow_then_read)
+    r = run("beacons", str(path))
+    assert r.code == 2 and "changed while being read" in r.err and "Traceback" not in r.err
+
+
+def test_median_interval_is_always_a_float_in_json(run, csv_file):
+    lines = [row(START + i * 900, "10.0.0.1", "203.0.113.9", 443, "tcp") for i in range(97)]  # odd count
+    r = run("beacons", str(write(csv_file, lines)), "--json")
+    value = r.json()["results"][0]["median_interval_s"]
+    assert isinstance(value, float) and value == 900.0
+
+
+def test_packed_tuple_key_round_trips_both_address_families():
+    from flowtest.commands.beacons import pack_key, unpack_key
+
+    cases = [
+        ("10.0.0.5", "203.0.113.9", 443, "tcp"),
+        ("fd00::1", "2001:db8::9", 53, "udp"),
+        ("10.0.0.5", "2001:db8::9", 0, "icmp"),
+        ("fd00::1", "203.0.113.9", 65535, "tcp"),
+    ]
+    keys = [pack_key(*c) for c in cases]
+    assert [unpack_key(k) for k in keys] == cases
+    assert len(set(keys)) == len(keys)
+    assert {len(k) for k in keys} == {3 + 8, 3 + 32, 3 + 20}
+
+
+def test_help_says_order_is_against_the_previous_accepted_row(run):
+    r = run("beacons", "--help")
+    assert "previous accepted row" in " ".join(r.out.split())
