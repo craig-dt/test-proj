@@ -4,8 +4,8 @@
 | :-: | :-: |
 | **Document Title** | flowtest v0.1 |
 | **Author** | Craig |
-| **Last Updated** | 2026-09-14 |
-| **Status** | Draft |
+| **Last Updated** | 2026-09-15 |
+| **Status** | Approved |
 | **Stakeholders** | Craig (PM, approver) · eng-reviewer agent (feasibility review) |
 | **Target Release** | v0.1 (GitHub milestone `v0.1`); date TBD |
 
@@ -17,6 +17,7 @@
 | :-: | :-: | :-: | :-: |
 | **Date** | **Author** | **Version** | **Change Summary** |
 | 2026-09-14 | Craig | 0.1 | Initial draft |
+| 2026-09-15 | Craig | 0.9 | v0.1 verified: #16 performance acceptance recorded (TC16 Pass); TC16a deferred to v0.2 (#30); Status Approved. |
 | 2026-09-15 | Craig | 0.8 | Final verify pass: recorded implementation decisions (blank lines, exit-2 causes, IP order, SI bytes, top-ports tie and `dst_port` key, gate on accepted count, `--internal` masking, JSON rounding); `docs/spec.md` reference removed; OQ 2 and 6 resolved. Open: the 16.5 M-row RSS bound is predicted to fail (#30); decision pending #16. |
 | 2026-09-15 | Craig | 0.7 | Slice 6 verify (PR #35 review): `bytes`/`packets` bounded at 2^63 − 1 (6.1); out-of-order rule is against the previous accepted flow and the stderr line prints only when non-zero (6.4). |
 | 2026-09-15 | Craig | 0.6 | Issue #29: Section 10 records the bounded-memory technique for `beacons` pass 2: a 1000-element reservoir sample of Intervals and byte sizes per Tuple, exact at or below 1000 flows, a fair (uniformly sampled) estimate above. No acceptance-criteria changes. |
@@ -403,8 +404,8 @@ The research brief (`docs/research-brief.md`) and the glossary (`CONTEXT.md`) de
 | 13a | 2 internal hosts only | No prevalence adjustment; stderr notes the skip |   |   |
 | 14 | `--internal 203.0.113.0/24` | Sources in that range scored; RFC 1918 sources external |   |   |
 | 15 | Piped stdout | No escape sequences |   |   |
-| 16 | 10 M-row synthetic file, all commands (manual) | ≤ 60 s / ≤ 60 s / ≤ 180 s; RSS < 1 GB; planted beacons in top 5 |   |   |
-| 16a | 16.5 M-row (~1 GB) stress file, all commands (manual) | RSS < 1 GB; times recorded |   |   |
+| 16 | 10 M-row synthetic file, all commands (manual) | ≤ 60 s / ≤ 60 s / ≤ 180 s; RSS < 1 GB; planted beacons in top 5 | 2026-09-15, Apple M3 Max 36 GB, macOS 15.6, Python 3.12: top-talkers 21.3 s / 85,770,240 B; top-ports 20.5 s / 89,505,792 B; beacons 65.7 s / 951,189,504 B; 5/5 planted beacons top 5 (#16) | Pass |
+| 16a | 16.5 M-row (~1 GB) stress file, all commands (manual) | RSS < 1 GB; times recorded | Not run for v0.1; predicted ~1.4 GB for `beacons` (#30) | Deferred to v0.2 (#30) |
 
 -----
 
