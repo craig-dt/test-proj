@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
 from conftest import ANSI, HEADER
 
 
@@ -141,7 +138,77 @@ def test_usage_error_exit_1(run):
     assert r.code == 1
 
 
-def test_version_flag_via_installed_script():
-    out = subprocess.run(["uv", "run", "flowtest", "--version"], capture_output=True, text=True, check=True)
-    assert out.stdout.strip().startswith("flowtest 0.")
-    assert sys.version_info >= (3, 12)
+def test_version_flag(run):
+    r = run("--version")
+    assert r.code == 0
+    assert r.out.strip().startswith("flowtest 0.")
+
+
+def test_default_limit_is_twenty(run, csv_file):
+    rows = "".join(f"2026-09-14T18:00:00Z,10.0.1.{i},203.0.113.9,443,tcp,{100 - i},1\n" for i in range(1, 22))
+    r = run("top-talkers", str(csv_file(HEADER + rows)), "--json")
+    assert len(r.json()["results"]) == 20
+
+
+def test_by_packets(run, csv_file):
+    text = HEADER + (
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,50\n"
+        "2026-09-14T18:00:00Z,10.0.0.2,203.0.113.9,443,tcp,999,1\n"
+    )
+    r = run("top-talkers", str(csv_file(text)), "--by", "packets", "--json")
+    assert r.json()["results"][0]["host"] == "10.0.0.1"
+
+
+def test_stdin_meta_input_is_dash(run, twelve):
+    r = run("top-talkers", "-", "--json", stdin_text=twelve.read_text())
+    assert r.json()["meta"]["input"] == "-"
+
+
+def test_clean_run_still_reports_zero_skipped(run, twelve):
+    # Craig's call (PRD 6.1 wording): the summary line prints on every run.
+    r = run("top-talkers", str(twelve))
+    assert "0 rows skipped" in r.err
+
+
+def test_header_only_table_is_just_the_header_line(run, csv_file):
+    r = run("top-talkers", str(csv_file(HEADER)))
+    assert r.code == 0
+    assert r.out.splitlines() == ["host  bytes  packets  flows"]
+
+
+def test_scoped_ipv6_never_reaches_stdout(run, csv_file):
+    text = HEADER + (
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,1\n"
+        "2026-09-14T18:00:00Z,fe80::1%\x1b[2K\x1b[1Aevil,2001:db8::9,443,tcp,1,1\n"
+    )
+    r = run("top-talkers", str(csv_file(text)))
+    assert r.code == 0 and not ANSI.search(r.out) and "1 rows skipped" in r.err
+
+
+def test_table_cells_are_sanitised_even_if_a_value_slips_through():
+    from flowtest.render import Column, render_table
+
+    out = render_table([Column("host", "host")], [{"host": "a\x1b[2Kb\n\x1b]52;c;x\x07"}])
+    assert "\x1b" not in out and "\x07" not in out
+    assert out.count("\n") == 2  # header + one row, no injected line
+
+
+def test_human_bytes_rounds_before_choosing_unit():
+    from flowtest.render import human_bytes
+
+    assert human_bytes(999_999) == "1.0 MB"
+    assert human_bytes(999_999_999) == "1.0 GB"
+    assert human_bytes(999) == "999 B"
+    assert human_bytes(1_200_000_000) == "1.2 GB"
+
+
+def test_read_error_mid_file_exits_2_without_traceback(run, twelve, monkeypatch):
+    from flowtest import reader
+
+    def boom(self):
+        raise OSError(5, "Input/output error")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(reader.FlowStream, "__iter__", boom)
+    r = run("top-talkers", str(twelve))
+    assert r.code == 2 and "Traceback" not in r.err and "Input/output error" in r.err

@@ -48,6 +48,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except BrokenPipeError:  # e.g. `flowtest ... | head`
         return 0
+    except OSError as exc:  # read error mid-file (disk I/O, closing FIFO): still "input could not be read"
+        sys.stderr.write(f"flowtest: {args.file}: {exc.strerror or exc}\n")
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

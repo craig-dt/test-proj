@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import heapq
+from operator import attrgetter
 
 from flowtest.options import add_common, build_meta
 from flowtest.reader import ip_sort_key, read_flows
@@ -28,11 +29,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace, start: float) -> int:
-    field = 1 if args.direction == "src" else 2  # Flow.src_ip / Flow.dst_ip
+    host_of = attrgetter(f"{args.direction}_ip")  # Flow.src_ip or Flow.dst_ip
     totals: dict[str, list[int]] = {}
     with read_flows(args.file) as stream:
         for flow in stream:
-            key = flow[field]
+            key = host_of(flow)
             t = totals.get(key)
             if t is None:
                 totals[key] = [flow.bytes, flow.packets, 1]

@@ -89,11 +89,109 @@ def test_ipv6_accepted(csv_file):
     assert stats.skipped == 0 and flows[0].src_ip == "fd00::1"
 
 
-def test_csv_reader_error_is_a_skipped_row(csv_file):
-    # An unterminated quote spanning to EOF makes the csv module raise; that record is skipped.
-    text = HEADER + '2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,1\n"unterminated,10.0.0.1\n'
+def test_oversized_field_is_a_skipped_row_and_reading_continues(csv_file):
+    # A field beyond csv.field_size_limit() makes the csv module reject the record (PRD 6.1).
+    import csv
+
+    huge = "x" * (csv.field_size_limit() + 10)
+    text = HEADER + (
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,1\n"
+        f"{huge},10.0.0.1,203.0.113.9,443,tcp,1,1\n"
+        "2026-09-14T18:00:02Z,10.0.0.2,203.0.113.9,443,tcp,1,1\n"
+    )
     flows, stats = read_all(csv_file(text))
-    assert len(flows) == 1 and stats.skipped == 1
+    assert [f.src_ip for f in flows] == ["10.0.0.1", "10.0.0.2"]
+    assert stats.skipped == 1 and stats.rows == 3
+
+
+def test_stray_quote_costs_one_row_not_the_rest_of_the_file(csv_file):
+    # Review F1: with quoting enabled a lone quote swallowed every following line. Policy: quoting off.
+    good = "2026-09-14T18:00:0{i}Z,10.0.0.{i},203.0.113.9,443,tcp,1,1\n"
+    text = (
+        HEADER
+        + good.format(i=1)
+        + '"oops,10.0.0.1,203.0.113.9,443,tcp,1,1\n'
+        + "".join(good.format(i=i) for i in range(2, 6))
+    )
+    flows, stats = read_all(csv_file(text))
+    assert len(flows) == 5 and stats.skipped == 1 and stats.rows == 6
+
+
+def test_fully_quoted_export_is_accepted(csv_file):
+    text = HEADER + '"2026-09-14T18:00:00Z","10.0.0.1","203.0.113.9","443","tcp","1","1"\n'
+    flows, stats = read_all(csv_file(text))
+    assert stats.skipped == 0 and flows[0].src_ip == "10.0.0.1" and flows[0].dst_port == 443
+
+
+def test_quoted_header_is_accepted(csv_file):
+    text = '"ts","src_ip","dst_ip","dst_port","proto","bytes","packets"\n' + (
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,1\n"
+    )
+    flows, _ = read_all(csv_file(text))
+    assert len(flows) == 1
+
+
+def test_scoped_ipv6_is_a_skipped_row(csv_file):
+    # Security finding: a scope id is echoed verbatim by ipaddress and can carry terminal escapes.
+    text = HEADER + "2026-09-14T18:00:00Z,fe80::1%\x1b[2Kevil,2001:db8::9,443,tcp,1,1\n"
+    flows, stats = read_all(csv_file(text))
+    assert flows == [] and stats.skipped == 1
+
+
+def test_ipv4_mapped_ipv6_is_the_ipv4_host(csv_file):
+    text = HEADER + "2026-09-14T18:00:00Z,::ffff:10.0.0.1,203.0.113.9,443,tcp,1,1\n"
+    flows, _ = read_all(csv_file(text))
+    assert flows[0].src_ip == "10.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,+5,tcp,1,1",  # signed port
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1_000,1",  # underscore digits
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,１２,1",  # full-width digits
+        "1e9,10.0.0.1,203.0.113.9,443,tcp,1,1",  # exponent epoch
+        "1_757_873_000,10.0.0.1,203.0.113.9,443,tcp,1,1",  # underscore epoch
+        "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,+100,1",  # signed bytes
+    ],
+)
+def test_only_plain_ascii_digits_are_numbers(csv_file, row):
+    _, stats = read_all(csv_file(HEADER + row + "\n"))
+    assert stats.skipped == 1
+
+
+def test_icmp_port_is_normalised_to_zero(csv_file):
+    text = HEADER + "2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,icmp,1,1\n"
+    flows, stats = read_all(csv_file(text))
+    assert stats.skipped == 0 and flows[0].dst_port == 0
+
+
+@pytest.mark.parametrize(
+    ("ts", "ok"),
+    [
+        ("946684799", False),  # 1999-12-31T23:59:59Z
+        ("946684800", True),  # 2000-01-01T00:00:00Z
+        ("4102444799", True),  # 2099-12-31T23:59:59Z
+        ("4102444800", False),  # 2100-01-01T00:00:00Z
+    ],
+)
+def test_timestamp_range_boundaries(csv_file, ts, ok):
+    flows, stats = read_all(csv_file(HEADER + f"{ts},10.0.0.1,203.0.113.9,443,tcp,1,1\n"))
+    assert (stats.skipped == 0) is ok
+    if ok:
+        assert flows[0].ts == int(ts)
+
+
+@pytest.mark.parametrize(("port", "ok"), [("65535", True), ("65536", False), ("0", True)])
+def test_port_boundaries(csv_file, port, ok):
+    _, stats = read_all(csv_file(HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,{port},tcp,1,1\n"))
+    assert (stats.skipped == 0) is ok
+
+
+def test_padded_fields_are_accepted(csv_file):
+    text = HEADER + " 2026-09-14T18:00:00Z , 10.0.0.1 , 203.0.113.9 , 443 , TCP , 1 , 1 \n"
+    flows, stats = read_all(csv_file(text))
+    assert stats.skipped == 0 and flows[0].dst_port == 443
 
 
 def test_skipped_row_records_physical_line_number(csv_file):

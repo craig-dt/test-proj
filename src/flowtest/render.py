@@ -13,18 +13,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import IO, Any
 
-from flowtest.reader import ReadStats
+from flowtest.reader import ReadStats, sanitize
 
 _UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
 
 
 def human_bytes(n: int) -> str:
-    """1000-based units with one decimal above bytes: 1200000000 -> '1.2 GB'."""
+    """1000-based units with one decimal above bytes: 1200000000 -> '1.2 GB', 999999 -> '1.0 MB'."""
+    if n < 1000:
+        return f"{n} B"
     value = float(n)
-    for unit in _UNITS:
-        if value < 1000 or unit == _UNITS[-1]:
-            return f"{n} B" if unit == "B" else f"{value:.1f} {unit}"
+    for unit in _UNITS[1:]:
         value /= 1000
+        if round(value, 1) < 1000 or unit == _UNITS[-1]:
+            return f"{value:.1f} {unit}"
     return f"{n} B"  # unreachable, keeps type checkers calm
 
 
@@ -41,7 +43,9 @@ class Column:
 
 
 def render_table(columns: list[Column], rows: list[dict[str, Any]]) -> str:
-    cells = [[col.fmt(row[col.key]) for col in columns] for row in rows]
+    # Every cell passes through sanitize(): nothing from the CSV reaches the terminal unsanitised,
+    # whatever the parser accepted.
+    cells = [[sanitize(col.fmt(row[col.key])) for col in columns] for row in rows]
     widths = [len(col.header) for col in columns]
     for line in cells:
         for i, text in enumerate(line):

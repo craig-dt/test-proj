@@ -10,6 +10,7 @@ import csv
 import io
 import ipaddress
 import math
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,6 +24,19 @@ TS_MIN = 946_684_800  # 2000-01-01T00:00:00Z
 TS_MAX = 4_102_444_800  # 2100-01-01T00:00:00Z (exclusive)
 PROTOS = frozenset({"tcp", "udp", "icmp"})
 ECHO_LIMIT = 80
+# Only plain ASCII digits count as numbers: no sign, underscore, exponent or Unicode digits.
+_DIGITS = re.compile(r"[0-9]+")
+_EPOCH = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def clean_field(raw: str) -> str:
+    """Trim whitespace and one pair of surrounding quotes. Quoting is disabled in the CSV reader
+    (a stray quote must cost one row, not the rest of the file), so fully-quoted exports are
+    handled here instead."""
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1].strip()
+    return s
 
 
 class InputError(Exception):
@@ -55,12 +69,12 @@ def sanitize(text: str, limit: int = ECHO_LIMIT) -> str:
 @lru_cache(maxsize=1 << 16)
 def parse_ts(raw: str) -> int | None:
     """Epoch seconds (optionally fractional) or ISO-8601 -> whole UTC seconds; None if invalid."""
-    s = raw.strip()
+    s = clean_field(raw)
     if not s:
         return None
-    try:
+    if _EPOCH.fullmatch(s):
         value = float(s)
-    except ValueError:
+    else:
         if s[-1] in "Zz":
             s = s[:-1] + "+00:00"
         try:
@@ -78,11 +92,22 @@ def parse_ts(raw: str) -> int | None:
 
 @lru_cache(maxsize=1 << 16)
 def parse_ip(raw: str) -> str | None:
-    """Canonical string form of an IPv4/IPv6 address, or None."""
+    """Canonical string form of an IPv4/IPv6 address, or None.
+
+    Scoped IPv6 literals (``fe80::1%eth0``) are rejected: flow exports never carry zone ids and
+    ``ipaddress`` echoes the scope text verbatim, which would let a crafted CSV put terminal escape
+    sequences into the output. IPv4-mapped IPv6 (``::ffff:10.0.0.1``) is unwrapped to the IPv4 host.
+    """
+    s = clean_field(raw)
+    if "%" in s:
+        return None
     try:
-        return str(ipaddress.ip_address(raw.strip()))
+        ip = ipaddress.ip_address(s)
     except ValueError:
         return None
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return str(ip)
 
 
 @lru_cache(maxsize=1 << 16)
@@ -93,11 +118,8 @@ def ip_sort_key(addr: str) -> tuple[int, int]:
 
 
 def _non_negative_int(raw: str) -> int | None:
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        return None
-    return value if value >= 0 else None
+    s = clean_field(raw)
+    return int(s) if _DIGITS.fullmatch(s) else None
 
 
 def parse_row(fields: list[str]) -> Flow | None:
@@ -107,16 +129,13 @@ def parse_row(fields: list[str]) -> Flow | None:
     ts = parse_ts(fields[0])
     src = parse_ip(fields[1])
     dst = parse_ip(fields[2])
-    proto = fields[4].strip().lower()
+    proto = clean_field(fields[4]).lower()
     if ts is None or src is None or dst is None or proto not in PROTOS:
         return None
-    port_raw = fields[3].strip()
-    if port_raw == "":
-        if proto != "icmp":
-            return None
-        port = 0
+    if proto == "icmp":
+        port = 0  # ICMP has no port; the glossary says ICMP Tuples use port 0 whatever the export says
     else:
-        port = _non_negative_int(port_raw)
+        port = _non_negative_int(fields[3])
         if port is None or port > 65535:
             return None
     nbytes = _non_negative_int(fields[5])
@@ -130,7 +149,9 @@ class FlowStream:
     """Iterates Flows from an open text handle, collecting ReadStats as it goes."""
 
     def __init__(self, handle: IO[str], source: str) -> None:
-        self._reader = csv.reader(handle)
+        # QUOTE_NONE: a lone quote must cost one row, never swallow the rest of the file (review F1).
+        # Fully-quoted exports still work because clean_field() strips one pair of quotes per field.
+        self._reader = csv.reader(handle, quoting=csv.QUOTE_NONE)
         self.source = source
         self.stats = ReadStats()
 
@@ -141,7 +162,7 @@ class FlowStream:
             raise InputError(f"{self.source}: empty input, no header row") from None
         except csv.Error as exc:
             raise InputError(f"{self.source}: cannot parse header ({exc})") from None
-        cells = tuple(c.strip().lstrip("﻿") for c in first)
+        cells = tuple(clean_field(c) for c in first)  # BOM already removed by utf-8-sig
         if cells != EXPECTED_HEADER:
             found = sanitize(",".join(first))
             raise InputError(
