@@ -211,7 +211,7 @@ def test_reservoir_holds_everything_until_it_is_full_then_stays_at_capacity():
     assert len(state.intervals) == 4 and set(state.intervals) == {60}
 
 
-def test_reservoir_sample_is_unbiased_over_a_ramp():
+def test_reservoir_sample_is_a_fair_sample_over_a_ramp():
     # Sizes 0..9999 in order: a fair sample has mean near 5000; keeping the first or last 1000 would not.
     ts = regular(10_000, 10)
     state = accumulate(ts, list(range(10_000)), 0, ts[-1])
@@ -343,13 +343,21 @@ def test_accumulator_costs_about_a_kilobyte_not_four():
     assert per_accumulator < 2000, f"{per_accumulator:.0f} bytes per 16-flow accumulator"
 
 
-def test_random_generator_is_created_only_when_a_reservoir_overflows():
-    acc = TupleAccumulator(KEY, 0, DAY, capacity=5)
-    for i in range(5):
-        acc.add(i * 60, i)
-    assert acc._rng is None
-    acc.add(5 * 60, 5)
-    assert acc._rng is not None
+def test_oversized_byte_count_is_a_contract_error_and_leaves_the_state_untouched():
+    # array('q') holds 64-bit values; the reader admits 20-digit numbers, so the bound must be explicit
+    # and checked before any mutation (re-review of the array fix in PR #33).
+    from flowtest.beacon import MAX_SIZE
+
+    acc = TupleAccumulator(KEY, 0, DAY)
+    acc.add(0, 100)
+    before = acc.state()
+    with pytest.raises(ValueError, match="byte count"):
+        acc.add(60, MAX_SIZE + 1)
+    with pytest.raises(ValueError, match="byte count"):
+        acc.add(60, -1)
+    assert acc.state() == before
+    acc.add(60, MAX_SIZE)  # the largest admitted value is fine
+    assert acc.state().sizes[-1] == MAX_SIZE
 
 
 @pytest.mark.parametrize("span", [1, 5, 23, 25, 97, 86399, 86401, 10**9 + 7])
