@@ -1,18 +1,30 @@
 """Beacon score: RITA v5's four sub-scores plus the Prevalence adjustment (PRD 6.4, ADR 0001).
 
-Pure functions over one Tuple's ordered timestamps and byte counts. No I/O, no CLI; the `beacons`
-command groups flows into Tuples, drops Out-of-order rows and applies `--min-flows` before calling in.
+Pure functions over one Tuple. No I/O, no CLI; the `beacons` command groups flows into Tuples, drops
+Out-of-order rows and applies `--min-flows` before calling in. Two entry points score a Tuple:
+
+- `score_state` works from a `TupleState`, the bounded per-Tuple state a `TupleAccumulator` builds one
+  flow at a time (issue #29): reservoir samples of at most `RESERVOIR_SIZE` non-zero Intervals and byte
+  sizes, the 24 bin counts, first/last timestamp and flow count. This is what pass 2 of `beacons` uses.
+- `score_tuple` takes the full timestamp and byte-count arrays, builds an exact (unsampled) `TupleState`
+  and calls `score_state`, so both paths share one formula.
+
 Every guard below is RITA's and part of the requirement (eng-review F2), not an implementation choice.
 """
 
 from __future__ import annotations
 
+import hashlib
+import random
 import statistics
+from array import array
 from collections.abc import Sequence
 from itertools import pairwise
 from typing import NamedTuple
 
 BINS = 24  # hourly histogram over the file span, whatever the span's length
+MAX_SIZE = 2**63 - 1  # reservoirs are array('q'); the reader admits up to 20 digits, so bound here too
+RESERVOIR_SIZE = 1000  # Intervals and byte sizes kept per Tuple; exact at or below, a fair sample above
 MIN_INTERVALS = 3  # non-zero Intervals needed before a Tuple is scorable
 MIN_OCCUPIED_BINS = 6  # duration coverage counts only when the Tuple appears in this many bins
 RUN_FULL_CREDIT = 12  # a run of this many consecutive non-empty bins is full duration credit
@@ -40,6 +52,142 @@ class PrevalenceResult(NamedTuple):
     score: float
     applied: bool
     delta: float
+
+
+class TupleState(NamedTuple):
+    """Everything `score_state` needs about one Tuple, bounded in size however many flows it had.
+
+    `intervals` and `sizes` are reservoir samples of at most `RESERVOIR_SIZE` values (or the full lists
+    when built by `score_tuple`). `nonzero_intervals` is the true count, used for the gate. `bins` are
+    the 24 counts over [file_first, file_last]; `first`/`last` are the Tuple's own timestamps.
+    """
+
+    intervals: list[int]
+    sizes: list[int]
+    bins: list[int]
+    first: int | None
+    last: int | None
+    flows: int
+    nonzero_intervals: int
+    file_first: int
+    file_last: int
+
+
+def _seed_for(key: tuple | str | bytes | int) -> int:
+    """A process-independent seed from the Tuple key (`hash()` of a str varies per process).
+
+    Restricted to key types whose `repr` is stable: a key embedding a memory address would silently
+    seed differently every run.
+    """
+    return int.from_bytes(hashlib.blake2b(repr(key).encode(), digest_size=8).digest(), "big")
+
+
+def _bin_index(ts: int, file_first: int, span: int) -> int:
+    """Integer bin for a timestamp: floor((ts - first) * 24 / span); a flow at exactly file_last lands
+    in bin 23. Shared by the accumulator and the full-array path so the two cannot drift."""
+    index = (ts - file_first) * BINS // span if span else 0
+    return min(index, BINS - 1)
+
+
+class TupleAccumulator:
+    """Feed one Tuple's flows in timestamp order; `state()` yields a `TupleState` at any point.
+
+    `key` identifies the Tuple (a tuple, str, bytes or int with a stable `repr`, e.g. the
+    (src, dst, port, proto) tuple) and seeds the reservoirs so a run is reproducible for a given Python
+    version. [file_first, file_last] is the whole file's span from pass 1. Reservoir replacement is
+    Vitter's Algorithm R. `add` raises ValueError on the same contract breaches as `score_tuple`; the
+    command checks `last` before calling `add` to spot and drop Out-of-order rows, so `flows` counts
+    accepted flows only and may be lower than the pass-1 count. Byte counts must be 0..MAX_SIZE (2^63 - 1):
+    the reader admits up to 20-digit numbers, so the command must treat larger sizes as Skipped rows
+    (issue #14). All checks run before any mutation.
+
+    Memory is the point of this class (PRD 10, eng-review F12): reservoirs and bins are compact
+    `array('q')`, the random generator is created only when a reservoir first overflows (about 500 of
+    the reference file's 330 k gate-passing Tuples ever do), and instances use `__slots__`. Measured
+    at roughly 1.1 KB per accumulator with data, versus 4.3 KB before those three choices.
+    """
+
+    __slots__ = (
+        "_bins",
+        "_capacity",
+        "_file_first",
+        "_file_last",
+        "_intervals",
+        "_key",
+        "_rng",
+        "_sizes",
+        "_span",
+        "first",
+        "flows",
+        "last",
+        "nonzero_intervals",
+    )
+
+    def __init__(
+        self, key: tuple | str | bytes | int, file_first: int, file_last: int, capacity: int = RESERVOIR_SIZE
+    ):
+        if file_last < file_first:
+            raise ValueError(f"file span ends ({file_last}) before it starts ({file_first})")
+        if capacity < MIN_INTERVALS:
+            # Quartiles need several points; at the gate a scorable Tuple then always has enough samples.
+            raise ValueError(f"capacity must be at least {MIN_INTERVALS}, got {capacity}")
+        self._key = key
+        self._file_first = file_first
+        self._file_last = file_last
+        self._span = file_last - file_first
+        self._capacity = capacity
+        self._rng: random.Random | None = None  # created lazily on the first reservoir overflow
+        self._intervals = array("q")
+        self._sizes = array("q")
+        self._bins = array("q", bytes(8 * BINS))
+        self.first: int | None = None
+        self.last: int | None = None
+        self.flows = 0
+        self.nonzero_intervals = 0
+
+    def _sample(self, reservoir: array, seen: int, value: int) -> None:
+        """Algorithm R: `seen` is how many values including this one have been offered."""
+        if len(reservoir) < self._capacity:
+            reservoir.append(value)
+            return
+        if self._rng is None:
+            self._rng = random.Random(_seed_for(self._key))
+        slot = self._rng.randrange(seen)
+        if slot < self._capacity:
+            reservoir[slot] = value
+
+    def add(self, ts: int, size: int) -> None:
+        # Every check happens before any mutation, so a rejected flow leaves the state untouched.
+        if not 0 <= size <= MAX_SIZE:
+            raise ValueError(f"byte count {size} is outside 0..{MAX_SIZE}")
+        if ts < self._file_first:
+            raise ValueError(f"timestamp {ts} is before the file span start {self._file_first}")
+        if ts > self._file_last:
+            raise ValueError(f"timestamp {ts} is after the file span end {self._file_last}")
+        if self.last is None:
+            self.first = ts
+        elif ts < self.last:
+            raise ValueError(f"timestamps must be in non-decreasing order ({ts} follows {self.last})")
+        elif ts != self.last:
+            self.nonzero_intervals += 1
+            self._sample(self._intervals, self.nonzero_intervals, ts - self.last)
+        self.last = ts
+        self.flows += 1
+        self._sample(self._sizes, self.flows, size)
+        self._bins[_bin_index(ts, self._file_first, self._span)] += 1
+
+    def state(self) -> TupleState:
+        return TupleState(
+            list(self._intervals),
+            list(self._sizes),
+            list(self._bins),
+            self.first,
+            self.last,
+            self.flows,
+            self.nonzero_intervals,
+            self._file_first,
+            self._file_last,
+        )
 
 
 def _clamp(value: float) -> float:
@@ -81,8 +229,7 @@ def _bin_counts(timestamps: Sequence[int], file_first: int, file_last: int) -> l
     span = file_last - file_first
     counts = [0] * BINS
     for ts in timestamps:
-        index = (ts - file_first) * BINS // span if span else 0
-        counts[min(index, BINS - 1)] += 1
+        counts[_bin_index(ts, file_first, span)] += 1
     return counts
 
 
@@ -122,29 +269,53 @@ def _check_inputs(timestamps: Sequence[int], sizes: Sequence[int], file_first: i
         raise ValueError(f"last timestamp {timestamps[-1]} is after the file span end {file_last}")
 
 
+def score_state(state: TupleState) -> BeaconScore | None:
+    """Score one Tuple from its reduced state. None means not scorable (fewer than 3 non-zero Intervals).
+
+    The gate uses the true `nonzero_intervals` count. Sub-scores 1 and 2 and the median Interval come
+    from the sampled `intervals` and `sizes`: exact when the Tuple had at most `RESERVOIR_SIZE` flows,
+    a fair (uniformly sampled) estimate above. Sub-scores 3 and 4 use the exact bin counts and first/last
+    timestamps.
+    """
+    if state.nonzero_intervals < MIN_INTERVALS or state.first is None or state.last is None:
+        return None
+    if len(state.bins) != BINS:
+        raise ValueError(f"expected {BINS} bin counts, got {len(state.bins)}")
+
+    interval_score, median_interval = _consistency(state.intervals, dispersion_default=1.0)
+    size_score, _ = _consistency(state.sizes, dispersion_default=0.0)
+    histogram_score = _histogram_score(state.bins)
+    duration_score = _duration_score(state.bins, state.last - state.first, state.file_last - state.file_first)
+
+    final = round((interval_score + size_score + histogram_score + duration_score) / 4, 3)
+    return BeaconScore(interval_score, size_score, histogram_score, duration_score, final, median_interval)
+
+
 def score_tuple(
     timestamps: Sequence[int], sizes: Sequence[int], file_first: int, file_last: int
 ) -> BeaconScore | None:
-    """Score one Tuple. None means not scorable (fewer than 3 non-zero Intervals).
+    """Score one Tuple from its full arrays. None means not scorable (fewer than 3 non-zero Intervals).
 
     `timestamps` are the Tuple's flow timestamps in order as whole epoch seconds (`int`, as the reader
     emits them; floats are not supported), `sizes` the matching byte counts, and [file_first, file_last]
     is the whole file's time span. Raises ValueError on inputs that break the contract: unordered
-    timestamps, timestamps outside the span, mismatched lengths.
+    timestamps, timestamps outside the span, mismatched lengths. Exact for any number of flows: it
+    builds an unsampled `TupleState` and hands it to `score_state`.
     """
     _check_inputs(timestamps, sizes, file_first, file_last)
     intervals = [b - a for a, b in pairwise(timestamps) if b != a]
-    if len(intervals) < MIN_INTERVALS:
-        return None
-
-    interval_score, median_interval = _consistency(intervals, dispersion_default=1.0)
-    size_score, _ = _consistency(sizes, dispersion_default=0.0)
-    counts = _bin_counts(timestamps, file_first, file_last)
-    histogram_score = _histogram_score(counts)
-    duration_score = _duration_score(counts, timestamps[-1] - timestamps[0], file_last - file_first)
-
-    final = round((interval_score + size_score + histogram_score + duration_score) / 4, 3)
-    return BeaconScore(interval_score, size_score, histogram_score, duration_score, final, median_interval)
+    state = TupleState(
+        intervals,
+        list(sizes),
+        _bin_counts(timestamps, file_first, file_last),
+        timestamps[0] if timestamps else None,
+        timestamps[-1] if timestamps else None,
+        len(timestamps),
+        len(intervals),
+        file_first,
+        file_last,
+    )
+    return score_state(state)
 
 
 def adjust_for_prevalence(score: float, *, hosts_to_dst: int, internal_hosts_total: int) -> PrevalenceResult:
