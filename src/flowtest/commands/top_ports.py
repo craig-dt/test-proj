@@ -71,6 +71,7 @@ def run(args: argparse.Namespace, start: float) -> int:
         results=[_json_row(r) for r in results] if args.json else results,
         meta=build_meta(NAME, args.file, stats, start),
         stats=stats,
+        no_color=args.no_color,
     )
     sys.stderr.write(f"{icmp_ignored} icmp flows ignored\n")
     return 0
