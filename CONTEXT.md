@@ -33,8 +33,8 @@ Tuples use port 0.
 _Avoid_: triad (RITA/Flare term), pair (which means source and destination only), connection key
 
 **Out-of-order row**:
-A Flow whose timestamp is earlier than the previous Flow of the same Tuple. Dropped from that Tuple's
-statistics and counted; never fatal. Interleaving between different Tuples is not out of order.
+A Flow whose timestamp is earlier than the previous *accepted* Flow of the same Tuple. Dropped from that
+Tuple's statistics and counted; never fatal. Interleaving between different Tuples is not out of order.
 _Avoid_: unsorted row, disorder
 
 **Pair**:
@@ -56,7 +56,8 @@ _Avoid_: C2 hit, callback, heartbeat (which is the benign look-alike)
 **Beacon score**:
 A number from 0.000 to 1.000, higher meaning more Beacon-like, formed from four equally weighted sub-scores
 (Interval regularity, byte-size consistency, hourly-histogram shape, time-span coverage) and adjusted by
-Prevalence. Follows RITA v5.
+Prevalence. RITA-inspired (RITA v5's formula), not RITA-compatible: flowtest groups by Tuple and reads
+flow records.
 _Avoid_: confidence, probability, risk score
 
 **Prevalence**:

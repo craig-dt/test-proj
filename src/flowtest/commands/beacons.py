@@ -310,7 +310,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "score: interval regularity, byte-size consistency, hourly-histogram shape and duration coverage, "
             "each 0 to 1 and averaged, then adjusted by Prevalence (+0.15 when at most 2% of Internal hosts "
             "reach the destination, -0.15 at 50% or more; only when at least 10 Internal hosts source Outbound "
-            "flows). Reads the file twice, so it needs a path and does not accept - for stdin."
+            "flows). RITA-inspired, not RITA-compatible: flowtest groups by (source, destination, port, protocol) and "
+            "reads flow records, treating one flow as one connection. Reads the file twice, so it needs a path "
+            "and does not accept - for stdin."
         ),
         epilog=(
             "A short burst scores lower than the same schedule kept up all file long: the histogram and "

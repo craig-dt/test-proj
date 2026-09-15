@@ -1,9 +1,26 @@
-# test-proj
+# flowtest
 
-FILL_IN: one-paragraph description of what this project does and for whom.
+Offline triage for a NetFlow-style CSV export, for a SOC analyst with a file and ten minutes. Three commands,
+no server, no database, no network access, standard library only:
+
+```sh
+uv run flowtest top-talkers flows.csv --by bytes --direction src     # who talks the most
+uv run flowtest top-ports   flows.csv --proto tcp                    # which ports are in play
+uv run flowtest beacons     flows.csv --min-flows 10 --limit 20      # regular call-outs, ranked by score
+```
+
+Add `--json` for one machine-readable object (`results` + `meta`) on stdout. Malformed rows are counted on
+stderr and never abort a run. Install with `uv tool install .`; `uv run flowtest --help` documents everything.
+
+Input: a CSV with the header `ts,src_ip,dst_ip,dst_port,proto,bytes,packets` (ISO-8601 or epoch timestamps,
+tcp/udp/icmp). One flow is treated as one connection; exports that split or merge connections distort the
+interval statistics. `beacons` scores (source, destination, port, protocol) Tuples of internal-to-external
+flows with a RITA-inspired formula (four sub-scores plus a prevalence adjustment; see `docs/adr/0001-*.md`).
+It is RITA-inspired, not RITA-compatible: RITA groups by host pair and reads Zeek logs. No Tuple is ever
+labelled a beacon; the analyst decides.
 
 ## Run / test
-See `CLAUDE.md` → Commands.
+See `CLAUDE.md` → Commands. Product requirements: `docs/prd.md`; glossary: `CONTEXT.md`.
 
 ## Reference input (performance runs)
 `scripts/gen_flows.py` (standard library only) writes the PRD section 10 synthetic file: 500 Internal hosts,

@@ -56,7 +56,7 @@ def run(args: argparse.Namespace, start: float) -> int:
     ranked = heapq.nsmallest(args.limit, totals.items(), key=lambda kv: (-kv[1][0], kv[0]))
     results = [
         {
-            "port": port,
+            "dst_port": port,  # same key as beacons and the CSV header (release review)
             "proto": proto,
             "port_proto": f"{port}/{proto}",
             "service": service_name(port, proto),

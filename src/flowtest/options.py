@@ -18,10 +18,10 @@ def tool_version() -> str:
 
 
 def positive_int(raw: str) -> int:
-    try:
-        value = int(raw)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{raw!r} is not an integer") from None
+    """A positive integer written in plain ASCII digits (the same rule the CSV fields follow)."""
+    if not (raw.isascii() and raw.isdigit()):
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a positive integer")
+    value = int(raw)
     if value <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return value

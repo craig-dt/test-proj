@@ -36,7 +36,7 @@ def test_ranking_is_by_flow_count_not_bytes(run, twelve):
     # 443/tcp: 5 flows / 7500 B, 80/tcp: 4 flows / 720 B, 53/udp: 2 flows / 1500 B.
     r = run("top-ports", str(twelve), "--json")
     results = r.json()["results"]
-    assert [(x["port"], x["proto"]) for x in results] == [(443, "tcp"), (80, "tcp"), (53, "udp")]
+    assert [(x["dst_port"], x["proto"]) for x in results] == [(443, "tcp"), (80, "tcp"), (53, "udp")]
     assert [x["flows"] for x in results] == [5, 4, 2]
     assert [x["bytes"] for x in results] == [7500, 720, 1500]
 
@@ -63,7 +63,7 @@ def test_equal_flow_counts_order_by_port_ascending(run, csv_file):
         "2026-09-14T18:00:03Z,10.0.0.1,203.0.113.9,80,tcp,100,1\n"
     )
     r = run("top-ports", str(csv_file(text)), "--json")
-    assert [x["port"] for x in r.json()["results"]] == [22, 80, 443, 8080]
+    assert [x["dst_port"] for x in r.json()["results"]] == [22, 80, 443, 8080]
 
 
 def test_limit_is_respected(run, csv_file):
@@ -71,7 +71,7 @@ def test_limit_is_respected(run, csv_file):
         f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,{1000 + i},tcp,100,1\n" for i in range(5)
     )
     r = run("top-ports", str(csv_file(text)), "--limit", "2", "--json")
-    assert [x["port"] for x in r.json()["results"]] == [1000, 1001]
+    assert [x["dst_port"] for x in r.json()["results"]] == [1000, 1001]
 
 
 def test_limit_zero_and_negative_exit_1(run, twelve):
@@ -90,7 +90,7 @@ def test_json_service_is_string_or_null_and_nothing_else_on_stdout(run, csv_file
     assert r.code == 0
     assert r.out.strip().startswith("{") and r.out.strip().endswith("}")
     doc = r.json()  # parses; nothing else on stdout
-    services = {x["port"]: x["service"] for x in doc["results"]}
+    services = {x["dst_port"]: x["service"] for x in doc["results"]}
     assert services == {443: "https", 44444: None}
     assert doc["meta"]["command"] == "top-ports"
     assert doc["meta"]["rows"] == 2 and doc["meta"]["rows_skipped"] == 0
@@ -132,7 +132,7 @@ def test_same_port_on_tcp_and_udp_are_separate_rows(run, csv_file):
         "2026-09-14T18:00:02Z,10.0.0.1,203.0.113.9,53,udp,100,1\n"
     )
     r = run("top-ports", str(csv_file(text)), "--json")
-    assert [(x["port"], x["proto"], x["flows"], x["service"]) for x in r.json()["results"]] == [
+    assert [(x["dst_port"], x["proto"], x["flows"], x["service"]) for x in r.json()["results"]] == [
         (53, "udp", 2, "dns"),
         (53, "tcp", 1, "dns"),
     ]
@@ -144,7 +144,7 @@ def test_equal_flows_on_the_same_port_order_tcp_before_udp(run, csv_file):
         "2026-09-14T18:00:01Z,10.0.0.1,203.0.113.9,53,tcp,100,1\n"
     )
     r = run("top-ports", str(csv_file(text)), "--json")
-    assert [(x["port"], x["proto"]) for x in r.json()["results"]] == [(53, "tcp"), (53, "udp")]
+    assert [(x["dst_port"], x["proto"]) for x in r.json()["results"]] == [(53, "tcp"), (53, "udp")]
 
 
 def test_json_meta_carries_the_icmp_count(run, twelve):
@@ -216,5 +216,5 @@ def test_service_table_covers_common_triage_ports(run, csv_file):
         f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,{port},{proto},100,1\n" for port, proto, _ in cases
     )
     r = run("top-ports", str(csv_file(text)), "--json", "--limit", "50")
-    got = {(x["port"], x["proto"]): x["service"] for x in r.json()["results"]}
+    got = {(x["dst_port"], x["proto"]): x["service"] for x in r.json()["results"]}
     assert got == {(port, proto): name for port, proto, name in cases}
