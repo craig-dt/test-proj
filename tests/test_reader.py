@@ -180,10 +180,33 @@ def test_absurdly_long_numbers_are_skipped_not_fatal(csv_file, column):
 
 
 def test_twenty_digit_numbers_are_the_limit(csv_file):
-    ok = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{'9' * 20},1\n"
-    too_long = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{'9' * 21},1\n"
-    assert read_all(csv_file(ok))[1].skipped == 0
+    ok = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,{'9' * 20}\n"
+    too_long = HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,1,{'9' * 21}\n"
+    # 20 digits is the parse limit; a 20-digit count is at least 10^19 and so above COUNT_MAX (2^63 - 1),
+    # which makes both rows Skipped rows for different reasons.
+    assert read_all(csv_file(ok))[1].skipped == 1
     assert read_all(csv_file(too_long, name="b.csv"))[1].skipped == 1
+
+
+@pytest.mark.parametrize("column", ["bytes", "packets"])
+def test_counts_are_bounded_below_2_pow_63(csv_file, column):
+    # Issue #14 / PRD 6.1: TupleAccumulator.add raises above 2^63 - 1, so the reader bounds the counts
+    # and every command sees the same Skipped row.
+    from flowtest.reader import COUNT_MAX
+
+    assert COUNT_MAX == 2**63 - 1
+    fields = {"bytes": "1", "packets": "1"}
+    fields[column] = str(COUNT_MAX)
+    at_max = (
+        HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{fields['bytes']},{fields['packets']}\n"
+    )
+    fields[column] = str(COUNT_MAX + 1)
+    over = (
+        HEADER + f"2026-09-14T18:00:00Z,10.0.0.1,203.0.113.9,443,tcp,{fields['bytes']},{fields['packets']}\n"
+    )
+    flows, stats = read_all(csv_file(at_max))
+    assert stats.skipped == 0 and getattr(flows[0], column) == COUNT_MAX
+    assert read_all(csv_file(over, name="over.csv"))[1].skipped == 1
 
 
 def test_icmp_port_is_normalised_to_zero(csv_file):
